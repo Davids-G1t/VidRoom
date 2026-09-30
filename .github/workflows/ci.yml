@@ -34,6 +34,10 @@ jobs:
       - name: E2E (no key)
         run: pnpm test:e2e
 
+      # 「启动 / 打开 ComfyUI」,用假 ComfyUI(Python 标准库)
+      - name: E2E (ComfyUI panel, fake ComfyUI)
+        run: pnpm exec playwright test --project=comfyui
+
       - name: Host listens on 127.0.0.1 only
         shell: pwsh
         working-directory: apps/host
@@ -119,6 +123,7 @@ jobs:
           Get-ChildItem $installDir | Format-Table Name, Length
           if (-not (Test-Path (Join-Path $installDir 'resources\host\host.mjs'))) { throw 'Host 没有打进安装包' }
           if (-not (Test-Path (Join-Path $installDir 'resources\web\index.html'))) { throw '聊天页没有打进安装包' }
+          if (-not (Test-Path (Join-Path $installDir 'resources\bin\7za.exe'))) { throw '解压 ComfyUI 便携包用的 7za.exe 没有打进安装包' }
 
           $hkcu = @(Find-VidRoomUninstallKeys 'HKCU')
           if ($hkcu.Count -ne 1) { throw "HKCU 里的 VidRoom 卸载项应为 1 个,实际 $($hkcu.Count)" }
@@ -154,3 +159,69 @@ jobs:
           name: desktop-e2e-screenshots
           path: test-results/
           if-no-files-found: ignore
+
+  # 真 ComfyUI:从官方 Release 下载 NVIDIA 便携包(中途主动断一次再续传)→ sha256 与清单比对 → 解压 →
+  # 查便携包自带 PyTorch 的 CUDA 版本 → --cpu 起停(/system_stats、只听 127.0.0.1、停后 30 秒内无残留)
+  comfyui:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # 便携包下载与解压的数据目录(job 级 env 里用不了 runner 上下文,这里写进 GITHUB_ENV)
+      - name: Set data dir
+        shell: pwsh
+        run: |
+          "VIDROOM_DATA_DIR=$(Join-Path $env:RUNNER_TEMP 'vidroom-data')" >> $env:GITHUB_ENV
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # 一条脚本做完:下载(100 MiB 处主动中断再续传)、校验、解压、torch.version.cuda、--cpu 起停与监听地址、残留检查
+      - name: Download portable, resume, verify, start with --cpu, stop
+        env:
+          # 起不来时每 120 秒把 ComfyUI 所有线程的调用栈打进日志,便于排查卡在哪
+          VIDROOM_COMFYUI_DUMP_STACKS_AFTER: '120'
+        run: pnpm comfyui:smoke -- --interrupt-download-at 104857600 --cpu
+
+      - name: No ComfyUI python process left (Get-Process)
+        shell: pwsh
+        run: |
+          $root = $env:VIDROOM_DATA_DIR
+          $left = Get-Process -Name python* -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($root) }
+          Get-Process -Name python* -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path
+          if ($left) { throw "还有 $($left.Count) 个便携包里的 python 进程没退出" }
+          Write-Host "OK: 没有 $root 下的 python 进程"
+
+      # 同一份真便携包走完整 Host:页面点「启动 ComfyUI」→「打开 ComfyUI」弹出页地址是 127.0.0.1:<端口>;
+      # 停 Host 在 Windows 上是强杀,ComfyUI 要靠 stdin 断开自己退出,30 秒内不残留
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium
+
+      - name: E2E (ComfyUI panel, real portable ComfyUI --cpu)
+        shell: pwsh
+        run: |
+          $top = Join-Path $env:VIDROOM_DATA_DIR 'runtime\comfyui-portable-0.38.0\ComfyUI_windows_portable'
+          $env:VIDROOM_COMFYUI_DIR = Join-Path $top 'ComfyUI'
+          $env:VIDROOM_COMFYUI_PYTHON = Join-Path $top 'python_embeded\python.exe'
+          $env:VIDROOM_COMFYUI_ARGS = '--cpu'
+          pnpm exec playwright test --project=comfyui
+
+      - name: No ComfyUI python process left after Host exit (Get-Process)
+        if: always()
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 2
+          $root = $env:VIDROOM_DATA_DIR
+          $left = Get-Process -Name python* -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($root) }
+          if ($left) { $left | Format-Table Id, ProcessName, Path; throw "还有 $($left.Count) 个便携包里的 python 进程没退出" }
+          Write-Host "OK: 没有 $root 下的 python 进程"

@@ -47,6 +47,14 @@ h2 {
   flex-wrap: wrap;
 }
 
+.comfy {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+
 .notice {
   margin: 0;
   opacity: 0.8;

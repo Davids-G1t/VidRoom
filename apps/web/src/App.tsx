@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { fetchStatus, sendChat, type ChatMessage, type StatusResult, type ToolCallRecord } from './api';
+import { ComfyPanel } from './ComfyPanel';
 import { Settings } from './Settings';
 
 interface Entry extends ChatMessage {
@@ -94,6 +95,8 @@ export function App() {
           ))}
         </div>
       </section>
+
+      <ComfyPanel />
 
       {notice && (
         <p className="notice" data-testid="notice">

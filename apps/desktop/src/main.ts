@@ -1,9 +1,10 @@
 import { join } from 'node:path';
-import { BrowserWindow, app, dialog, ipcMain, protocol, safeStorage, session, type IpcMainInvokeEvent } from 'electron';
+import { BrowserWindow, app, dialog, ipcMain, protocol, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron';
 import { handleAppRequest } from './app-protocol.js';
+import { comfyUrlFromStatus } from './comfy-url.js';
 import { HostProcess } from './host-process.js';
 import { KeyStore, normalizeKeyInput } from './key-store.js';
-import { IPC, type KeyStatus, type SetKeyResult } from './ipc-channels.js';
+import { IPC, type KeyStatus, type OpenComfyResult, type SetKeyResult } from './ipc-channels.js';
 import { APP_ENTRY_URL, APP_SCHEME, assertTrustedSender, isAppUrl } from './trust.js';
 
 // 只给自动化测试隔离用户数据目录用(Electron 自己没有对应的命令行参数)
@@ -20,7 +21,10 @@ const resourcesDir = app.isPackaged ? process.resourcesPath : null;
 const hostScript = resourcesDir ? join(resourcesDir, 'host', 'host.mjs') : join(app.getAppPath(), 'dist', 'host', 'host.mjs');
 const webDir = resourcesDir ? join(resourcesDir, 'web') : join(app.getAppPath(), '..', 'web', 'dist');
 
-const host = new HostProcess({ script: hostScript, webDir, log });
+// 打包版 Host 被打成单文件、没有 node_modules:解压 ComfyUI 便携包用的 7za.exe 随安装包放在 resources/bin
+const hostEnv: Record<string, string> =
+  resourcesDir && process.platform === 'win32' ? { VIDROOM_7ZA: join(resourcesDir, 'bin', '7za.exe') } : {};
+const host = new HostProcess({ script: hostScript, webDir, env: hostEnv, log });
 let keyStore: KeyStore;
 
 /** 粗略的「有任务在跑」:正在转发中的聊天请求数(第 3 批有了任务队列再换成真的任务状态) */
@@ -50,6 +54,15 @@ function registerIpc(): void {
     keyStore.save(key);
     await host.setKey(key);
     return { ok: true };
+  });
+
+  handleTrusted(IPC.openComfyUI, async (): Promise<OpenComfyResult> => {
+    const res = await host.fetchApi('/api/comfyui', { method: 'GET' });
+    const url = comfyUrlFromStatus(res.ok ? await res.json() : null);
+    if (url === null) return { ok: false, message: 'ComfyUI 还没有运行。' };
+    await shell.openExternal(url);
+    log(`[vidroom-desktop] 在系统浏览器里打开 ${url}`);
+    return { ok: true, url };
   });
 }
 

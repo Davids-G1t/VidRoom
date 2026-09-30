@@ -6,6 +6,7 @@ import type { LanguageModel } from 'ai';
 import { LaunchAuth, SESSION_COOKIE, parseCookies, sessionCookieHeader } from './auth.js';
 import { runChat, type ChatMessage } from './agent.js';
 import type { RunNvidiaSmi } from './gpu.js';
+import type { ComfyManager } from './comfyui/manager.js';
 
 /** 写死只听本机回环地址 */
 export const LISTEN_HOST = '127.0.0.1';
@@ -21,6 +22,8 @@ export interface HostOptions {
   runNvidiaSmi?: RunNvidiaSmi;
   /** 需要从错误信息里抹掉的秘密(API key) */
   secrets?: string[];
+  /** ComfyUI 生命周期;不给就没有 /api/comfyui 接口(单测用) */
+  comfy?: ComfyManager;
 }
 
 export interface Host {
@@ -145,6 +148,21 @@ export async function startHost(opts: HostOptions): Promise<Host> {
       return;
     }
 
+    if (opts.comfy && pathname === '/api/comfyui' && req.method === 'GET') {
+      sendJson(res, 200, opts.comfy.status());
+      return;
+    }
+    if (opts.comfy && pathname === '/api/comfyui/start' && req.method === 'POST') {
+      void opts.comfy.start();
+      sendJson(res, 202, opts.comfy.status());
+      return;
+    }
+    if (opts.comfy && pathname === '/api/comfyui/stop' && req.method === 'POST') {
+      await opts.comfy.stop();
+      sendJson(res, 200, opts.comfy.status());
+      return;
+    }
+
     sendJson(res, 404, { error: 'not_found' });
   }
 
@@ -203,6 +221,9 @@ export async function startHost(opts: HostOptions): Promise<Host> {
       model = m;
       secrets = s;
     },
-    close: () => new Promise((ok, fail) => server.close((e) => (e ? fail(e) : ok()))),
+    close: async () => {
+      await opts.comfy?.stop();
+      await new Promise<void>((ok, fail) => server.close((e) => (e ? fail(e) : ok())));
+    },
   };
 }

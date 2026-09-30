@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { createDeepSeekModel } from './agent.js';
+import { ComfyManager, parseExtraArgs } from './comfyui/manager.js';
 import { KEY_FILE_ENV, loadDeepSeekKey } from './key.js';
 import { parseParentMessage, type HostToParent } from './parent-ipc.js';
 import { startHost } from './server.js';
@@ -7,6 +8,9 @@ import { startHost } from './server.js';
 const webDir = process.env.VIDROOM_WEB_DIR ?? fileURLToPath(new URL('../../web/dist', import.meta.url));
 const port = Number(process.env.VIDROOM_PORT ?? 0);
 const baseURL = process.env.VIDROOM_DEEPSEEK_BASE_URL || undefined;
+
+// ComfyUI 只在用户点「启动 ComfyUI」时才找/下载/起;VIDROOM_COMFYUI_ARGS 给它加参数(如 --cpu)
+const comfy = new ComfyManager({ extraArgs: parseExtraArgs(process.env.VIDROOM_COMFYUI_ARGS) });
 
 const modelFor = (apiKey: string | null) => (apiKey ? createDeepSeekModel(apiKey, baseURL) : null);
 
@@ -29,7 +33,7 @@ if (process.send) {
     const secrets = msg.apiKey ? [msg.apiKey] : [];
     if (host === null) {
       // 第一条 set-key 到了才起服务,页面第一次查状态时 key 已就位
-      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets });
+      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets, comfy });
       send({ type: 'ready', launchUrl: host.launchUrl });
     } else {
       host.setModel(modelFor(msg.apiKey), secrets);
@@ -44,10 +48,20 @@ if (process.send) {
       process.exit(1);
     });
   });
-  process.on('disconnect', () => process.exit(0));
+  // 壳退出/崩溃(IPC 断开)或发来 SIGTERM(Linux 上壳的 kill()):先停 ComfyUI 再退出。
+  // 壳在 Windows 上 kill() 是强杀,走不到这里 —— 那时 ComfyUI 靠 stdin 断开自己退出(见 comfyui/process.ts)。
+  let exiting = false;
+  const shutdown = () => {
+    if (exiting) return;
+    exiting = true;
+    comfy.stop().finally(() => process.exit(0));
+  };
+  process.on('disconnect', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 } else {
   const apiKey = loadDeepSeekKey();
-  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [] });
+  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy });
 
   if (!apiKey) {
     console.log(`[vidroom] 没有配置 DeepSeek API key(环境变量 ${KEY_FILE_ENV} 未设置或文件不存在),聊天功能不可用。`);

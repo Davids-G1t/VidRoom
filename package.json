@@ -15,8 +15,10 @@
     "test:e2e": "pnpm build && playwright test --project=no-key",
     "test:e2e:gpu": "pnpm build && playwright test --project=gpu",
     "test:e2e:desktop": "pnpm build && playwright test --project=desktop",
+    "test:e2e:comfyui": "pnpm build && playwright test --project=comfyui",
     "desktop": "pnpm build && pnpm --filter @vidroom/desktop start",
-    "dist:win": "pnpm build && pnpm --filter @vidroom/desktop dist --win"
+    "dist:win": "pnpm build && pnpm --filter @vidroom/desktop dist --win",
+    "comfyui:smoke": "pnpm --filter @vidroom/host comfyui:smoke"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

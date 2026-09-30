@@ -45,3 +45,26 @@ export async function sendChat(messages: ChatMessage[]): Promise<ChatResult> {
     return { kind: 'error', message: '连不上 VidRoom Host。' };
   }
 }
+
+/** Host 里 ComfyUI 的状态(见 apps/host/src/comfyui/manager.ts) */
+export type ComfyStatus =
+  | { state: 'stopped' }
+  | { state: 'installing'; phase: 'downloading' | 'extracting'; received?: number; total?: number }
+  | { state: 'starting' }
+  | { state: 'running'; port: number; url: string; devices: string[] }
+  | { state: 'error'; message: string };
+
+async function comfyRequest(path: string, method: 'GET' | 'POST'): Promise<ComfyStatus | null> {
+  try {
+    const res = await fetch(path, { method });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body?.state === 'string' ? (body as ComfyStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+export const fetchComfy = () => comfyRequest('/api/comfyui', 'GET');
+export const startComfy = () => comfyRequest('/api/comfyui/start', 'POST');
+export const stopComfy = () => comfyRequest('/api/comfyui/stop', 'POST');

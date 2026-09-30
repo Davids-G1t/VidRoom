@@ -124,7 +124,8 @@ function comfyProcesses(comfyDir: string): string[] {
       [
         '-NoProfile',
         '-Command',
-        `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${comfyDir.replace(/'/g, "''")}') } | ForEach-Object { [string]$_.ProcessId + ' ' + $_.Name }`,
+        // 排除这条查询自己的 powershell 进程(它的命令行里也有这个目录)
+        `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains('${comfyDir.replace(/'/g, "''")}') } | ForEach-Object { [string]$_.ProcessId + ' ' + $_.Name }`,
       ],
       { encoding: 'utf8' },
     );
@@ -151,7 +152,7 @@ if (!opts['install-only']) {
     if (opts['expect-device']) check(first.includes(opts['expect-device']), `设备名「${first}」含「${opts['expect-device']}」`);
 
     const addrs = listeningAddrs(proc.pid);
-    check(addrs.length > 0 && addrs.every((a) => a.startsWith('127.0.0.1:')), `ComfyUI 进程只监听 127.0.0.1:${addrs.join(', ')}`);
+    check(addrs.length > 0 && addrs.every((a) => a.startsWith('127.0.0.1:')), `ComfyUI 进程只监听 127.0.0.1(${addrs.join(', ')})`);
     check(addrs.includes(`127.0.0.1:${proc.port}`), `监听的就是分配给它的随机端口 ${proc.port}`);
 
     if (opts.hold) {

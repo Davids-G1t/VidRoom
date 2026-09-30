@@ -208,7 +208,8 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
         await (await fetch('/api/status')).text(),
       ];
     });
-    expect(dump[0]).toBe('{"configured":true}');
+    // 桥只回「当前用哪家、各家有没有 key」
+    expect(dump[0]).toBe('{"configured":true,"provider":"deepseek","providers":{"deepseek":true,"anthropic":false}}');
     expect(dump.join('\n')).not.toContain(FAKE_KEY);
     expect(dump.join('\n')).not.toContain('vidroom_session');
 

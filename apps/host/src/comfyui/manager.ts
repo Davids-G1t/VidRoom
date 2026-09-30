@@ -1,5 +1,5 @@
 import { resolveComfyInstall, type ComfyInstall, type ResolveOptions } from './install.js';
-import { ComfyProcess } from './process.js';
+import { ComfyProcess, MEMORY_LIMIT_EXIT_CODE } from './process.js';
 import { checkVersions, type VersionCheck } from './versions.js';
 
 /** 给页面和 agent 看的 ComfyUI 状态 */
@@ -16,6 +16,8 @@ export interface ComfyManagerOptions {
   extraArgs?: string[];
   readyTimeoutMs?: number;
   log?: (msg: string) => void;
+  /** Windows:ComfyUI 的内存上限(MiB),见 process.ts 的作业对象护栏 */
+  memoryLimitMiB?: number;
 }
 
 /**
@@ -61,6 +63,7 @@ export class ComfyManager {
           readyTimeoutMs: this.opts.readyTimeoutMs,
           signal: abort.signal,
           log,
+          memoryLimitMiB: this.opts.memoryLimitMiB,
         });
         this.proc = proc;
         const stats = await proc.systemStats();
@@ -76,7 +79,12 @@ export class ComfyManager {
         void proc.exited.then(() => {
           if (this.proc !== proc) return;
           this.proc = null;
-          this.current = { state: 'error', message: `ComfyUI 意外退出:\n${proc.output().slice(-2_000)}` };
+          const why =
+            proc.exitCode === MEMORY_LIMIT_EXIT_CODE
+              ? `ComfyUI 内存超过上限(${this.opts.memoryLimitMiB} MiB)被结束,VidRoom 本身不受影响`
+              : 'ComfyUI 意外退出';
+          log(`[comfyui] ${why}(退出码 ${proc.exitCode})`);
+          this.current = { state: 'error', message: `${why}:\n${proc.output().slice(-2_000)}` };
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -110,4 +118,15 @@ export class ComfyManager {
 /** VIDROOM_COMFYUI_ARGS="--cpu --foo" → ['--cpu', '--foo'] */
 export function parseExtraArgs(value: string | undefined): string[] {
   return (value ?? '').split(/\s+/).filter(Boolean);
+}
+
+/**
+ * ComfyUI 内存上限默认值(只在 Windows 上生效):物理内存减去给系统、Host 和桌面壳留的 4 GiB,至少 4 GiB。
+ * 可用环境变量 VIDROOM_COMFYUI_MEMORY_LIMIT_MB 改;设 0 表示不设上限。
+ */
+export const MEMORY_LIMIT_ENV = 'VIDROOM_COMFYUI_MEMORY_LIMIT_MB';
+export function defaultMemoryLimitMiB(totalBytes: number, env: NodeJS.ProcessEnv = process.env): number {
+  const v = env[MEMORY_LIMIT_ENV];
+  if (v !== undefined && v.trim() !== '' && Number.isFinite(Number(v))) return Math.max(0, Math.floor(Number(v)));
+  return Math.max(4096, Math.floor(totalBytes / 2 ** 20) - 4096);
 }

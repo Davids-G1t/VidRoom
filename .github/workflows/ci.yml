@@ -23,7 +23,15 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # 单元测试;其中真实调用 nvidia-smi 的用例在无显卡的 CI 上应判 none
+      # 假 ComfyUI 回放出片要用 ffmpeg 生成占位视频、ffprobe 读元数据
+      - name: Install ffmpeg
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
+          ffmpeg -version | Select-Object -First 1
+
+      # 单元测试;其中真实调用 nvidia-smi 的用例在无显卡的 CI 上应判 none;
+      # 作业对象内存护栏(comfyui-memory-guard.test.ts)只在这里(Windows)真跑
       - name: Unit tests
         run: pnpm test
 

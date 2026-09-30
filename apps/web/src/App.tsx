@@ -1,7 +1,22 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { fetchStatus, sendChat, type ChatMessage, type StatusResult, type ToolCallRecord } from './api';
+import { About } from './About';
+import {
+  ABUSE_REPORT_URL,
+  fetchJob,
+  fetchStatus,
+  fetchVideos,
+  sendChat,
+  type ChatMessage,
+  type JobState,
+  type StatusResult,
+  type ToolCallRecord,
+  type VideoRecord,
+} from './api';
 import { ComfyPanel } from './ComfyPanel';
+import { desktopApi } from './desktop';
+import { H3Panel } from './H3Panel';
 import { Settings } from './Settings';
+import { VideoGallery } from './VideoGallery';
 
 interface Entry extends ChatMessage {
   toolCalls?: ToolCallRecord[];
@@ -10,6 +25,19 @@ interface Entry extends ChatMessage {
 const PRESET_WORKFLOWS = ['文字生成视频', '图片生成视频'];
 const NO_KEY_TEXT = '没有配置 API key,请去设置。';
 
+function describeJob(j: JobState | null): string {
+  if (j?.state === 'preparing') return `正在准备出片:${j.message}…`;
+  if (j?.state === 'running') return j.max > 0 ? `MiniMax H3 正在生成视频:第 ${j.value} / ${j.max} 步` : 'MiniMax H3 正在生成视频…';
+  return '思考中…';
+}
+
+/** 举报滥用:桌面版交给主进程用系统浏览器打开(页面不能开新窗口),浏览器里直接开新标签页 */
+export function openAbuseReport(): void {
+  const api = desktopApi();
+  if (api) void api.openAbuseReport();
+  else window.open(ABUSE_REPORT_URL, '_blank', 'noopener');
+}
+
 export function App() {
   const [status, setStatus] = useState<StatusResult | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -17,10 +45,24 @@ export function App() {
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [job, setJob] = useState<JobState | null>(null);
+  const [videos, setVideos] = useState<VideoRecord[]>([]);
 
   useEffect(() => {
     fetchStatus().then(setStatus);
+    fetchVideos().then(setVideos);
   }, []);
+
+  // 聊天请求挂着的时候(可能正在出片),每秒取一次出片进度(Host 转发自 ComfyUI 的 WebSocket)
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => fetchJob().then(setJob), 1000);
+    return () => {
+      clearInterval(t);
+      setJob(null);
+    };
+  }, [pending]);
 
   const hasKey = status?.kind === 'ok' && status.hasApiKey;
   const noKey = status?.kind === 'ok' && !status.hasApiKey;
@@ -36,6 +78,7 @@ export function App() {
     setNotice(null);
     const result = await sendChat(history.map(({ role, content }) => ({ role, content })));
     setPending(false);
+    fetchVideos().then(setVideos);
     if (result.kind === 'ok') {
       setEntries([...history, { role: 'assistant', content: result.text, toolCalls: result.toolCalls }]);
     } else if (result.kind === 'no_api_key') {
@@ -51,10 +94,19 @@ export function App() {
     <div className="app">
       <header>
         <h1>VidRoom</h1>
-        <button type="button" onClick={() => setSettingsOpen((open) => !open)}>
-          设置
-        </button>
+        <nav className="menu" aria-label="菜单">
+          <button type="button" onClick={() => setSettingsOpen((open) => !open)}>
+            设置
+          </button>
+          <button type="button" onClick={() => setAboutOpen(true)}>
+            关于
+          </button>
+          <button type="button" onClick={openAbuseReport}>
+            举报滥用
+          </button>
+        </nav>
       </header>
+      {aboutOpen && <About onClose={() => setAboutOpen(false)} onReport={openAbuseReport} />}
 
       {status?.kind === 'unauthorized' && (
         <div className="banner" role="alert" data-testid="unauthorized-notice">
@@ -96,7 +148,11 @@ export function App() {
         </div>
       </section>
 
+      <H3Panel />
+
       <ComfyPanel />
+
+      <VideoGallery videos={videos} />
 
       {notice && (
         <p className="notice" data-testid="notice">
@@ -118,7 +174,11 @@ export function App() {
             )}
           </div>
         ))}
-        {pending && <div className="message assistant pending">思考中…</div>}
+        {pending && (
+          <div className="message assistant pending" data-testid="pending">
+            {describeJob(job)}
+          </div>
+        )}
       </main>
 
       <form className="composer" onSubmit={onSubmit}>

@@ -33,9 +33,73 @@ export const COMFY_LISTEN_HOST = '127.0.0.1';
 export const STOP_GRACE_MS = 10_000;
 /** 引导代码等不到 ComfyUI 自己退出、只好 os._exit 时用的退出码,用来和「正常退出」区分 */
 export const WATCHDOG_EXIT_CODE = 86;
+/** Windows 上 ComfyUI 内存超过作业对象上限、被整组结束时的退出码 */
+export const MEMORY_LIMIT_EXIT_CODE = 87;
+/** 传给 ComfyUI 进程的内存上限(MiB);引导代码读它建作业对象。只在 Windows 上生效 */
+export const JOB_MEMORY_LIMIT_ENV = 'VIDROOM_JOB_MEMORY_LIMIT_MB';
 
-const BOOTSTRAP = [
+/**
+ * Windows 内存护栏(引导代码里用 ctypes 调 Win32 API,不需要原生 Node 模块):
+ * 设了 VIDROOM_JOB_MEMORY_LIMIT_MB 就建一个作业对象(Job Object),设 JOB_OBJECT_LIMIT_JOB_MEMORY
+ * 把 ComfyUI 进程(和它以后起的子进程)放进去,再挂一个完成端口收通知。整组提交内存超过上限时,
+ * 系统拒绝那次分配并发来 JOB_OBJECT_MSG_JOB_MEMORY_LIMIT / _PROCESS_MEMORY_LIMIT,
+ * 监视线程收到就 TerminateJobObject(退出码 MEMORY_LIMIT_EXIT_CODE)—— 只结束 ComfyUI 这一组,
+ * Host 不在这个作业里,不受影响。建作业之前(解释器刚启动)的那一点内存不受限,可忽略。
+ */
+const JOB_MEMORY_GUARD = [
+  'def _job_memory_guard():',
+  `    mb = int(os.environ.get('${JOB_MEMORY_LIMIT_ENV}') or 0)`,
+  "    if os.name != 'nt' or mb <= 0:",
+  '        return',
+  '    import ctypes',
+  '    from ctypes import wintypes',
+  "    k32 = ctypes.WinDLL('kernel32', use_last_error=True)",
+  '    k32.CreateJobObjectW.restype = wintypes.HANDLE',
+  '    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]',
+  '    k32.CreateIoCompletionPort.restype = wintypes.HANDLE',
+  '    k32.CreateIoCompletionPort.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.c_size_t, wintypes.DWORD]',
+  '    k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]',
+  '    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]',
+  '    k32.GetCurrentProcess.restype = wintypes.HANDLE',
+  '    k32.TerminateJobObject.argtypes = [wintypes.HANDLE, ctypes.c_uint]',
+  '    k32.GetQueuedCompletionStatus.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_void_p), wintypes.DWORD]',
+  '    class BASIC(ctypes.Structure):',
+  "        _fields_ = [('PerProcessUserTimeLimit', ctypes.c_int64), ('PerJobUserTimeLimit', ctypes.c_int64), ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t), ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD), ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD), ('SchedulingClass', wintypes.DWORD)]",
+  '    class IO(ctypes.Structure):',
+  "        _fields_ = [(n, ctypes.c_ulonglong) for n in ('ReadOps', 'WriteOps', 'OtherOps', 'ReadBytes', 'WriteBytes', 'OtherBytes')]",
+  '    class EXT(ctypes.Structure):',
+  "        _fields_ = [('Basic', BASIC), ('Io', IO), ('ProcessMemoryLimit', ctypes.c_size_t), ('JobMemoryLimit', ctypes.c_size_t), ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t)]",
+  '    class PORT(ctypes.Structure):',
+  "        _fields_ = [('CompletionKey', ctypes.c_void_p), ('CompletionPort', wintypes.HANDLE)]",
+  '    job = k32.CreateJobObjectW(None, None)',
+  '    port = k32.CreateIoCompletionPort(wintypes.HANDLE(-1), None, 0, 1)',
+  '    assoc = PORT(None, port)',
+  // JobObjectAssociateCompletionPortInformation = 7;JobObjectExtendedLimitInformation = 9;JOB_OBJECT_LIMIT_JOB_MEMORY = 0x200
+  '    ok = job and port and k32.SetInformationJobObject(job, 7, ctypes.byref(assoc), ctypes.sizeof(assoc))',
+  '    ext = EXT()',
+  '    ext.Basic.LimitFlags = 0x200',
+  '    ext.JobMemoryLimit = mb * 1024 * 1024',
+  '    ok = ok and k32.SetInformationJobObject(job, 9, ctypes.byref(ext), ctypes.sizeof(ext))',
+  '    ok = ok and k32.AssignProcessToJobObject(job, k32.GetCurrentProcess())',
+  '    if not ok:',
+  "        sys.stderr.write('[vidroom] 建内存上限作业对象失败,错误码 %d,ComfyUI 不受内存上限保护\\n' % ctypes.get_last_error())",
+  '        return',
+  "    sys.stderr.write('[vidroom] ComfyUI 内存上限 %d MiB(Windows 作业对象)\\n' % mb)",
+  '    def _watch_job():',
+  '        msg = wintypes.DWORD(); key = ctypes.c_size_t(); ov = ctypes.c_void_p()',
+  '        while k32.GetQueuedCompletionStatus(port, ctypes.byref(msg), ctypes.byref(key), ctypes.byref(ov), 0xFFFFFFFF):',
+  // JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT = 9、JOB_OBJECT_MSG_JOB_MEMORY_LIMIT = 10
+  '            if msg.value in (9, 10):',
+  "                sys.stderr.write('[vidroom] ComfyUI 内存超过上限 %d MiB,结束 ComfyUI\\n' % mb)",
+  '                sys.stderr.flush()',
+  `                k32.TerminateJobObject(job, ${MEMORY_LIMIT_EXIT_CODE})`,
+  '    threading.Thread(target=_watch_job, daemon=True).start()',
+  '_job_memory_guard()',
+];
+
+export const BOOTSTRAP = [
   'import os, signal, sys, threading, time, _thread',
+  ...JOB_MEMORY_GUARD,
   'def _wait_stdin_closed():',
   "    if os.name == 'nt':",
   // Windows 上不能在线程里阻塞读 stdin:同步管道句柄上挂着一个 ReadFile 时,别的线程对同一句柄的操作
@@ -81,6 +145,8 @@ export interface ComfyStartOptions {
   /** 等就绪期间收到中止就停掉进程、抛错 */
   signal?: AbortSignal;
   log?: (msg: string) => void;
+  /** Windows:ComfyUI 整组进程的内存上限(MiB),超了只结束 ComfyUI。不给或 ≤0 不设上限;其它平台忽略 */
+  memoryLimitMiB?: number;
 }
 
 export interface StopResult {
@@ -137,6 +203,11 @@ export class ComfyProcess {
     return this.exitInfo === null;
   }
 
+  /** 退出码(还在跑是 undefined) */
+  get exitCode(): number | null | undefined {
+    return this.exitInfo?.code;
+  }
+
   /** 最近的输出(最多约 64KB) */
   output(): string {
     return this.out;
@@ -159,7 +230,12 @@ export class ComfyProcess {
     ];
     const child = spawn(opts.install.python, args, {
       cwd: opts.install.comfyDir,
-      env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        PYTHONIOENCODING: 'utf-8',
+        [JOB_MEMORY_LIMIT_ENV]: opts.memoryLimitMiB && opts.memoryLimitMiB > 0 ? String(Math.floor(opts.memoryLimitMiB)) : '',
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       // Linux 上自成一个进程组,停的时候连它的子进程一起发信号

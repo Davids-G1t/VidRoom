@@ -1,12 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
+import { createReadStream } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import type { LanguageModel } from 'ai';
 import { LaunchAuth, SESSION_COOKIE, parseCookies, sessionCookieHeader } from './auth.js';
 import { runChat, type ChatMessage } from './agent.js';
 import type { RunNvidiaSmi } from './gpu.js';
 import type { ComfyManager } from './comfyui/manager.js';
+import type { VideoService } from './h3/service.js';
 
 /** 写死只听本机回环地址 */
 export const LISTEN_HOST = '127.0.0.1';
@@ -24,6 +27,8 @@ export interface HostOptions {
   secrets?: string[];
   /** ComfyUI 生命周期;不给就没有 /api/comfyui 接口(单测用) */
   comfy?: ComfyManager;
+  /** 出片服务;不给就没有 generate_video 工具和 /api/h3、/api/videos 接口 */
+  video?: VideoService;
 }
 
 export interface Host {
@@ -111,7 +116,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     res.end(data);
   }
 
-  async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
+  async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string, url: URL): Promise<void> {
     const session = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     if (!auth.isValidSession(session)) {
       sendJson(res, 401, { error: 'unauthorized', message: '未登录:请用 Host 启动时打印的启动地址打开页面。' });
@@ -139,7 +144,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
         return;
       }
       try {
-        const reply = await runChat(model, messages, opts.runNvidiaSmi);
+        const reply = await runChat(model, messages, { runNvidiaSmi: opts.runNvidiaSmi, video: opts.video });
         sendJson(res, 200, reply);
       } catch (err) {
         console.error('[vidroom] 调用 LLM 失败:', redact(err instanceof Error ? err.message : String(err), secrets));
@@ -162,6 +167,8 @@ export async function startHost(opts: HostOptions): Promise<Host> {
       sendJson(res, 200, opts.comfy.status());
       return;
     }
+
+    if (opts.video && (await handleVideoApi(opts.video, req, res, pathname, url))) return;
 
     sendJson(res, 404, { error: 'not_found' });
   }
@@ -196,7 +203,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     }
 
     if (pathname === '/api' || pathname.startsWith('/api/')) {
-      done(handleApi(req, res, pathname));
+      done(handleApi(req, res, pathname, url));
       return;
     }
 
@@ -226,4 +233,63 @@ export async function startHost(opts: HostOptions): Promise<Host> {
       await new Promise<void>((ok, fail) => server.close((e) => (e ? fail(e) : ok())));
     },
   };
+}
+
+/** 出片相关接口;处理了返回 true */
+async function handleVideoApi(video: VideoService, req: IncomingMessage, res: ServerResponse, pathname: string, url: URL): Promise<boolean> {
+  const method = req.method;
+  if (pathname === '/api/h3' && method === 'GET') {
+    // 核对模型要算 sha256(首次几十 GB 要一分钟上下,之后走缓存),只在明确要时才做
+    sendJson(res, 200, await video.status({ inspectModels: url.searchParams.get('models') === '1' }));
+    return true;
+  }
+  if (pathname === '/api/h3/consent' && method === 'POST') {
+    let sha = '';
+    try {
+      sha = String(((await readJson(req)) as { licenseSha256?: unknown })?.licenseSha256 ?? '');
+    } catch {
+      // 当成空
+    }
+    try {
+      sendJson(res, 200, await video.acceptLicense(sha));
+    } catch (err) {
+      sendJson(res, 409, { error: 'license_mismatch', message: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+  if (pathname === '/api/h3/download' && method === 'POST') {
+    try {
+      await video.startDownload();
+      sendJson(res, 202, (await video.status({ inspectModels: false })).download);
+    } catch (err) {
+      sendJson(res, 403, { error: 'no_consent', message: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+  if (pathname === '/api/video/job' && method === 'GET') {
+    sendJson(res, 200, video.job());
+    return true;
+  }
+  if (pathname === '/api/video/cancel' && method === 'POST') {
+    await video.cancel();
+    sendJson(res, 200, video.job());
+    return true;
+  }
+  if (pathname === '/api/videos' && method === 'GET') {
+    sendJson(res, 200, (await video.library().list()).map(({ file: _f, ...pub }) => pub));
+    return true;
+  }
+  const m = /^\/api\/videos\/([\w-]+)\/file$/.exec(pathname);
+  if (m && method === 'GET') {
+    const rec = await video.library().get(m[1]);
+    const size = rec ? await stat(rec.file).then((s) => s.size, () => null) : null;
+    if (!rec || size === null) {
+      sendJson(res, 404, { error: 'not_found' });
+      return true;
+    }
+    res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': size, 'cache-control': 'no-store' });
+    await pipeline(createReadStream(rec.file), res);
+    return true;
+  }
+  return false;
 }

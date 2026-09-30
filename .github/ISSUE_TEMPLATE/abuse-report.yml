@@ -1,0 +1,40 @@
+name: 举报滥用 / Abuse report
+description: 举报用 VidRoom(MiniMax H3)生成或传播违规内容、违反使用政策的行为
+title: "[abuse] "
+labels: ["abuse"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢举报。处置流程与维护者能做 / 做不到的事见 [docs/abuse.md](https://github.com/Davids-G1t/VidRoom/blob/main/docs/abuse.md),
+        判断依据是 [docs/USE-POLICY.md](https://github.com/Davids-G1t/VidRoom/blob/main/docs/USE-POLICY.md)(MiniMax H3 许可第 V 节与附件 A)。
+
+        **请不要在这里上传违规视频或截图原件**,用文字描述即可;需要证据时维护者会私下联系。
+        涉及违法内容(尤其是涉及未成年人)请直接向当地执法机关报告。
+  - type: dropdown
+    id: category
+    attributes:
+      label: 违规类型
+      options:
+        - 侵犯他人权利(肖像、知识产权等)
+        - 冒充他人 / 深度伪造
+        - 涉及未成年人
+        - 虚假信息 / 影响选举
+        - 骚扰、诽谤、歧视
+        - 暴力极端主义
+        - 未标注 AI 生成而公开发布
+        - 其它
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 情况描述
+      description: 发生了什么、在哪里看到的(公开链接如有请给出)、为什么认为违反了使用政策
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: 联系方式(可选)
+      description: 如希望维护者私下联系你,请留下方式;不填也会处理

@@ -171,13 +171,13 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
     await expect(page.getByTestId('no-key-notice')).toBeVisible();
     await expect(page.getByTestId('preset-workflows')).toBeVisible();
 
-    // 安全边界:页面里没有 Node,桥上只有两个函数;窗口的 webPreferences 如设计
+    // 安全边界:页面里没有 Node,桥上只有这四个函数;窗口的 webPreferences 如设计
     const surface = await page.evaluate(() => ({
       require: typeof (globalThis as { require?: unknown }).require,
       process: typeof (globalThis as { process?: unknown }).process,
       bridge: Object.keys((window as unknown as { vidroom: object }).vidroom).sort(),
     }));
-    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openComfyUI', 'setKey'] });
+    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openAbuseReport', 'openComfyUI', 'setKey'] });
     const prefs = await first.app.evaluate(({ BrowserWindow }) => {
       const p = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
       return { sandbox: p?.sandbox, contextIsolation: p?.contextIsolation, nodeIntegration: p?.nodeIntegration };
@@ -348,6 +348,49 @@ test('「打开 ComfyUI」在系统浏览器里打开 http://127.0.0.1:<端口>/
     await expect.poll(() => isAlive(comfyPid!), { timeout: 30_000 }).toBe(false);
     await expect.poll(() => isAlive(hostPid), { timeout: 15_000 }).toBe(false);
     console.log(`[comfyui] 应用退出后 ${Date.now() - t0} 毫秒内 ComfyUI(pid ${comfyPid})已不在`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('「举报滥用」:应用菜单和页面按钮都在系统浏览器里打开 abuse-report issue 模板;「关于」页有 MiniMax H3 与 NOTICE 原文', async () => {
+  const ABUSE_URL = 'https://github.com/Davids-G1t/VidRoom/issues/new?template=abuse-report.yml';
+  const fake = await startFakeLlm();
+  try {
+    const run = await launch(mkdtempSync(join(tmpdir(), 'vidroom-desktop-e2e-')), fake);
+    const { page, app } = run;
+    await app.evaluate(({ shell }) => {
+      const g = globalThis as unknown as { __opened: string[] };
+      g.__opened = [];
+      shell.openExternal = (async (url: string) => {
+        g.__opened.push(url);
+      }) as typeof shell.openExternal;
+    });
+    const opened = () => app.evaluate(() => (globalThis as unknown as { __opened: string[] }).__opened);
+
+    // 应用菜单「帮助 → 举报滥用」
+    const label = await app.evaluate(({ Menu }) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById('abuse-report');
+      item?.click();
+      return item?.label;
+    });
+    expect(label).toBe('举报滥用');
+    await expect.poll(opened).toEqual([ABUSE_URL]);
+
+    // 页面上的「举报滥用」按钮(经 IPC,地址由主进程定)
+    await page.getByLabel('菜单').getByRole('button', { name: '举报滥用' }).click();
+    await expect.poll(opened).toEqual([ABUSE_URL, ABUSE_URL]);
+
+    // 「关于」页
+    await page.getByRole('button', { name: '关于' }).click();
+    const about = page.getByTestId('about');
+    await expect(about).toContainText('MiniMax H3');
+    await expect(about.getByTestId('h3-notice')).toHaveText(
+      'MiniMax H3 is licensed under the MiniMax H3 Community License Agreement, Copyright © 2026 MiniMax. All Rights Reserved.',
+    );
+    await page.screenshot({ path: shots('6-about') });
+    await closeWindow(app);
+    await run.exited;
   } finally {
     await fake.close();
   }

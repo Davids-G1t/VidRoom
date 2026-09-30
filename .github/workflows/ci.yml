@@ -23,12 +23,28 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # 假 ComfyUI 回放出片要用 ffmpeg 生成占位视频、ffprobe 读元数据
-      - name: Install ffmpeg
+      # ffmpeg 一律用清单锁定的 LGPL 构建(剪辑工具用它;不装 choco 的 GPL 版):按清单下载 + sha256 校验 + 解压到默认数据目录,
+      # 再把它的 bin 加进 PATH —— 假 ComfyUI 回放出占位视频、测试里直接调的 ffprobe 也都用这一份
+      - name: Fetch locked LGPL ffmpeg
         shell: pwsh
         run: |
-          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
-          ffmpeg -version | Select-Object -First 1
+          $out = @(pnpm --silent ffmpeg:fetch)
+          if ($LASTEXITCODE -ne 0) { $out | Write-Host; throw 'ffmpeg:fetch 失败' }
+          $out | Write-Host
+          $bin = ($out | Where-Object { $_.Trim() } | Select-Object -Last 1).Trim()
+          if (-not (Test-Path (Join-Path $bin 'ffmpeg.exe'))) { throw "找不到 $bin\ffmpeg.exe" }
+          $bin >> $env:GITHUB_PATH
+
+      # 验收②:PATH 上的 ffmpeg 就是上一步那份,configuration 行里没有 --enable-gpl
+      - name: ffmpeg -version has no --enable-gpl
+        shell: pwsh
+        run: |
+          Write-Host "ffmpeg: $((Get-Command ffmpeg).Source)"
+          $cfg = (ffmpeg -hide_banner -version | Select-String '^configuration:').Line
+          Write-Host $cfg
+          if (-not $cfg) { throw 'ffmpeg -version 里没有 configuration 行' }
+          if ($cfg -split '\s+' -contains '--enable-gpl') { throw 'PATH 上的 ffmpeg 是 --enable-gpl 构建' }
+          Write-Host 'OK: configuration 行里没有 --enable-gpl'
 
       # 单元测试;其中真实调用 nvidia-smi 的用例在无显卡的 CI 上应判 none;
       # 作业对象内存护栏(comfyui-memory-guard.test.ts)只在这里(Windows)真跑

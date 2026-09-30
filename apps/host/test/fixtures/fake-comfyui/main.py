@@ -96,6 +96,17 @@ def fail(prompt_id, prompt):
                           'status': {'status_str': 'error', 'completed': False, 'messages': []}}
 
 
+_h264 = {}
+
+
+def h264_encoder_args(ffmpeg):
+    """PATH 上的 ffmpeg 若是 LGPL 构建(CI 用 VidRoom 锁定的那份)就没有 libx264,改用 libopenh264"""
+    if 'args' not in _h264:
+        r = subprocess.run([ffmpeg, '-hide_banner', '-encoders'], capture_output=True, text=True)
+        _h264['args'] = ['-c:v', 'libx264', '-preset', 'ultrafast'] if ' libx264 ' in r.stdout else ['-c:v', 'libopenh264']
+    return _h264['args']
+
+
 def run_job(prompt_id, prompt, cid, extra_pnginfo):
     busy['on'] = True
     try:
@@ -118,9 +129,10 @@ def run_job(prompt_id, prompt, cid, extra_pnginfo):
         name = f'MiniMax_H3_{counter["n"]:05d}_.mp4'
         os.makedirs(os.path.join(OUTPUT_DIR, sub), exist_ok=True)
         out = os.path.join(OUTPUT_DIR, sub, name)
-        cmd = [os.environ.get('FAKE_COMFY_FFMPEG', 'ffmpeg'), '-hide_banner', '-loglevel', 'error', '-y',
+        ffmpeg = os.environ.get('FAKE_COMFY_FFMPEG', 'ffmpeg')
+        cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
                '-f', 'lavfi', '-i', f'testsrc=size={width}x{height}:rate=24',
-               '-frames:v', str(frames), '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'ultrafast']
+               '-frames:v', str(frames), '-pix_fmt', 'yuv420p', *h264_encoder_args(ffmpeg)]
         # 同真 SaveVideo:extra_pnginfo 的每个键写成容器元数据,值经 json.dumps
         for k, v in (extra_pnginfo or {}).items():
             cmd += ['-metadata', f'{k}={json.dumps(v)}']

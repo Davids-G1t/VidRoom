@@ -24,6 +24,8 @@ export interface DownloadOptions {
   signal?: AbortSignal;
   onProgress?: (received: number, total: number) => void;
   log?: (msg: string) => void;
+  /** 日志前缀里的名字,默认 comfyui */
+  tag?: string;
 }
 
 export interface DownloadResult {
@@ -55,11 +57,12 @@ async function fileSize(path: string): Promise<number> {
 
 /** 已有 dest 且校验通过就直接用;否则下载。 */
 export async function downloadVerified(opts: DownloadOptions): Promise<DownloadResult> {
-  const log = opts.log ?? (() => {});
+  const raw = opts.log ?? (() => {});
+  const log = (m: string) => raw(`[${opts.tag ?? 'comfyui'}] ${m}`);
   const result: DownloadResult = { resumedFrom: [], redownloads: 0 };
 
   if ((await fileSize(opts.dest)) === opts.size && (await sha256File(opts.dest)) === opts.sha256) {
-    log(`[comfyui] ${opts.dest} 已存在且 sha256 一致,不重下`);
+    log(`${opts.dest} 已存在且 sha256 一致,不重下`);
     return result;
   }
   await rm(opts.dest, { force: true });
@@ -71,7 +74,7 @@ export async function downloadVerified(opts: DownloadOptions): Promise<DownloadR
     if (actual === opts.sha256) break;
     await rm(part, { force: true });
     if (round >= 1) throw new ChecksumMismatchError(opts.sha256, actual);
-    log(`[comfyui] sha256 不一致(${actual}),删掉重下`);
+    log(`sha256 不一致(${actual}),删掉重下`);
     result.redownloads += 1;
   }
   await rename(part, opts.dest);
@@ -95,7 +98,7 @@ async function fetchToPart(opts: DownloadOptions, part: string, result: Download
     } catch (err) {
       if (opts.signal?.aborted) throw err;
       if (attempt >= retries) throw err;
-      log(`[comfyui] 下载中断(${err instanceof Error ? err.message : String(err)}),${delay} 毫秒后续传`);
+      log(`下载中断(${err instanceof Error ? err.message : String(err)}),${delay} 毫秒后续传`);
       await sleep(delay);
     }
   }
@@ -121,9 +124,9 @@ async function fetchOnce(
     }
     append = true;
     result.resumedFrom.push(offset);
-    log(`[comfyui] 从第 ${offset} 字节续传`);
+    log(`从第 ${offset} 字节续传`);
   } else if (res.status === 200) {
-    if (offset > 0) log('[comfyui] 服务器不支持续传,从头下载');
+    if (offset > 0) log('服务器不支持续传,从头下载');
   } else if (res.status === 416 && offset > 0) {
     await res.body?.cancel();
     await rm(part, { force: true });

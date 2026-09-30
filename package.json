@@ -20,7 +20,8 @@
     "test:e2e:abuse": "pnpm build && playwright test --project=abuse",
     "desktop": "pnpm build && pnpm --filter @vidroom/desktop start",
     "dist:win": "pnpm build && pnpm --filter @vidroom/desktop dist --win",
-    "comfyui:smoke": "pnpm --filter @vidroom/host comfyui:smoke"
+    "comfyui:smoke": "pnpm --filter @vidroom/host comfyui:smoke",
+    "ffmpeg:fetch": "pnpm --filter @vidroom/host ffmpeg:fetch"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

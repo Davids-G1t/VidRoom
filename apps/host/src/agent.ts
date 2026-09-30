@@ -1,6 +1,7 @@
 import { createDeepSeek } from '@ai-sdk/deepseek';
 import { generateText, isStepCount, tool, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
+import type { VideoEditor } from './ffmpeg/editor.js';
 import { probeGpu, type RunNvidiaSmi } from './gpu.js';
 import { MAX_SECONDS, PROMPT_MAX_WORDS, PROMPT_MIN_WORDS, type VideoService } from './h3/service.js';
 
@@ -33,6 +34,11 @@ export const SYSTEM_PROMPT = [
   '20. 用生成的内容去训练或改进别的 AI 模型。',
   '判断看意图,不看个别字眼:普通的风景、动物、生活、创意短片照常生成,虚构作品里出现打斗、爆炸之类的情节不算违规;',
   '只拒绝明显违规的请求。',
+  '\n\n【剪辑】作品库里的视频可以剪切(trim_video)、拼接(concat_videos)、烧字幕(add_subtitle),都按视频 id 操作,',
+  '结果作为新的一条放进作品库,原片不动。用户说「这条」「刚才那条」而你不知道 id 时,先调 list_videos,默认取最新的一条。',
+  '一句话里有多步(比如「剪成前 2 秒再加字幕」)就按顺序调用,后一步用前一步返回的新 id。',
+  '时间都用秒;「前 2 秒」就是 start=0、end=2。字幕是烧进画面的文字,不是可开关的字幕轨。',
+  '工具返回 ok=false 时把 reason 如实转告;成功后告诉用户新视频的时长,以及 note 里提到的注意事项。',
 ].join('');
 
 export interface ChatMessage {
@@ -56,6 +62,44 @@ export interface AgentDeps {
   runNvidiaSmi?: RunNvidiaSmi;
   /** 不给就没有 generate_video 工具 */
   video?: VideoService;
+  /** 不给就没有剪辑工具(list_videos / trim_video / concat_videos / add_subtitle) */
+  editor?: VideoEditor;
+}
+
+function editTools(editor: VideoEditor): ToolSet {
+  const id = z.string().describe('作品库里的视频 id(从 list_videos 或上一步工具结果里拿)');
+  return {
+    list_videos: tool({
+      description: '列出作品库里的视频(最新的在前,最多 20 条):id、时长、生成时间、提示词开头、是否由剪辑得到。',
+      inputSchema: z.object({}),
+      execute: async () => editor.list(),
+    }),
+    trim_video: tool({
+      description:
+        '把一条视频剪出 [start, end) 这一段,存成新视频。起点落在关键帧上时直接流复制(快),' +
+        '否则重新编码以保证剪得准(慢一些)。',
+      inputSchema: z.object({
+        video_id: id,
+        start: z.number().min(0).describe('起点,秒'),
+        end: z.number().positive().describe('终点,秒;超过视频长度按视频结尾算'),
+      }),
+      execute: async ({ video_id, start, end }) => editor.trim(video_id, start, end),
+    }),
+    concat_videos: tool({
+      description: '按给定顺序把两条或更多视频首尾拼成一条新视频。尺寸或帧率不一致时统一成第一条的规格。',
+      inputSchema: z.object({ video_ids: z.array(z.string()).min(2).describe('按播放顺序排列的视频 id') }),
+      execute: async ({ video_ids }) => editor.concat(video_ids),
+    }),
+    add_subtitle: tool({
+      description: '把一行文字烧进视频画面(任何播放器都能看到),存成新视频。文字不宜太长,需要换行时用 \\n。',
+      inputSchema: z.object({
+        video_id: id,
+        text: z.string().min(1).max(200).describe('字幕文字'),
+        position: z.enum(['bottom', 'top', 'center']).default('bottom').describe('位置,默认底部'),
+      }),
+      execute: async ({ video_id, text, position }) => editor.subtitle(video_id, text, position),
+    }),
+  };
 }
 
 export function createTools(deps: AgentDeps = {}): ToolSet {
@@ -66,10 +110,12 @@ export function createTools(deps: AgentDeps = {}): ToolSet {
     inputSchema: z.object({}),
     execute: async () => probeGpu(deps.runNvidiaSmi),
   });
+  const edit = deps.editor ? editTools(deps.editor) : {};
   const video = deps.video;
-  if (!video) return { probe_gpu };
+  if (!video) return { probe_gpu, ...edit };
   return {
     probe_gpu,
+    ...edit,
     generate_video: tool({
       description:
         '用本地的 MiniMax H3 模型生成一条带声音的短视频(文生视频),完成后自动放进作品库。' +

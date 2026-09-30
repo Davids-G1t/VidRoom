@@ -8,7 +8,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "comfyui:smoke": "node --import tsx scripts/comfyui-smoke.ts",
-    "h3:models": "node --import tsx scripts/h3-models.ts"
+    "h3:models": "node --import tsx scripts/h3-models.ts",
+    "ffmpeg:fetch": "node --import tsx scripts/ffmpeg-fetch.ts"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",

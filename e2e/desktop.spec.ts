@@ -64,7 +64,8 @@ function findHostPid(parentPid: number): number | null {
       [
         '-NoProfile',
         '-Command',
-        `Get-CimInstance Win32_Process -Filter "ParentProcessId=${parentPid}" | Where-Object { $_.CommandLine -like '*host.mjs*' } | Select-Object -ExpandProperty ProcessId`,
+        // 命令里不用双引号:Node 在 Windows 上转义参数时会把双引号改写,PowerShell 解析会出错
+        `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${parentPid} -and $_.CommandLine -like '*host.mjs*' } | Select-Object -ExpandProperty ProcessId`,
       ],
       { encoding: 'utf8' },
     ).stdout;
@@ -98,7 +99,7 @@ function hostProcessInfo(pid: number): string {
   if (process.platform === 'win32') {
     return execFileSync(
       'powershell',
-      ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+      ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq ${pid} }).CommandLine`],
       { encoding: 'utf8' },
     );
   }
@@ -202,7 +203,9 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
     await expect(page2.getByTestId('no-key-notice')).toHaveCount(0);
 
     // key 不在 Host 进程的命令行(和 Linux 上的环境变量)里
-    expect(hostProcessInfo(hostPid2)).not.toContain(FAKE_KEY);
+    const info = hostProcessInfo(hostPid2);
+    expect(info).toContain('host.mjs'); // 确认真读到了 Host 的命令行,不是空串
+    expect(info).not.toContain(FAKE_KEY);
 
     await box.fill('我这台电脑能跑什么');
     await page2.getByRole('button', { name: '发送' }).click();

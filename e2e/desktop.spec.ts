@@ -49,53 +49,60 @@ async function launch(userDataDir: string, fake: FakeLlm): Promise<Launched> {
   const page = await app.firstWindow();
   const hostPid = async () => {
     let pid: number | null = null;
-    try {
-      await expect.poll(() => (pid = findHostPid(app.process().pid!)), { timeout: 30_000 }).not.toBeNull();
-    } catch (err) {
-      console.log(`[diag] 主进程 pid=${app.process().pid}\n${processTable()}`);
-      throw err;
-    }
+    await expect.poll(() => (pid = findHostPid(app.process().pid!)), { timeout: 30_000 }).not.toBeNull();
     return pid!;
   };
   return { app, page, hostPid, exited };
 }
 
-/** 找不到 Host 时打印进程表,便于排查 */
-function processTable(): string {
-  if (process.platform === 'win32') {
-    const r = spawnSync(
-      'powershell',
-      [
-        '-NoProfile',
-        '-Command',
-        `Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*VidRoom*' } | Format-List ProcessId, ParentProcessId, CommandLine`,
-      ],
-      { encoding: 'utf8' },
-    );
-    return r.stdout + r.stderr;
-  }
-  return spawnSync('ps', ['-eo', 'pid,ppid,args'], { encoding: 'utf8' }).stdout;
+interface ProcRow {
+  pid: number;
+  ppid: number;
+  cmd: string;
 }
 
-/** 从操作系统里找 Host:主进程的子进程里,命令行带 host.mjs 的那个 */
-function findHostPid(parentPid: number): number | null {
-  let out: string;
-  if (process.platform === 'win32') {
-    out = spawnSync(
-      'powershell',
-      [
-        '-NoProfile',
-        '-Command',
-        // 命令里不用双引号:Node 在 Windows 上转义参数时会把双引号改写,PowerShell 解析会出错
-        `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${parentPid} -and $_.CommandLine -like '*host.mjs*' } | Select-Object -ExpandProperty ProcessId`,
-      ],
-      { encoding: 'utf8' },
-    ).stdout;
-  } else {
-    out = spawnSync('pgrep', ['-P', String(parentPid), '-f', 'host\\.mjs'], { encoding: 'utf8' }).stdout;
+function processTable(): ProcRow[] {
+  const out =
+    process.platform === 'win32'
+      ? spawnSync(
+          'powershell',
+          [
+            '-NoProfile',
+            '-Command',
+            // 命令里不用双引号:Node 在 Windows 上转义参数时会改写双引号
+            `Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + '|' + [string]$_.ParentProcessId + '|' + $_.CommandLine }`,
+          ],
+          { encoding: 'utf8' },
+        ).stdout
+      : spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8' }).stdout.replace(
+          /^\s*(\d+)\s+(\d+)\s+/gm,
+          '$1|$2|',
+        );
+  return out
+    .split(/\r?\n/)
+    .map((line) => line.split('|'))
+    .filter((parts) => parts.length >= 3 && /^\d+$/.test(parts[0]))
+    .map(([pid, ppid, ...cmd]) => ({ pid: Number(pid), ppid: Number(ppid), cmd: cmd.join('|') }));
+}
+
+/**
+ * 从操作系统里找 Host:Playwright 起的进程的后代里,命令行带 host.mjs 的那个。
+ * (Windows 上 Playwright 起的进程和 Electron 主进程之间还隔着一层,Host 是它的孙子进程。)
+ */
+function findHostPid(rootPid: number): number | null {
+  const rows = processTable();
+  const descendants = new Set([rootPid]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const r of rows) {
+      if (descendants.has(r.ppid) && !descendants.has(r.pid)) {
+        descendants.add(r.pid);
+        grew = true;
+      }
+    }
   }
-  const pids = out.split(/\s+/).filter(Boolean).map(Number);
-  return pids.length === 1 ? pids[0] : null;
+  const hosts = rows.filter((r) => r.pid !== rootPid && descendants.has(r.pid) && r.cmd.includes('host.mjs'));
+  return hosts.length === 1 ? hosts[0].pid : null;
 }
 
 function isAlive(pid: number): boolean {

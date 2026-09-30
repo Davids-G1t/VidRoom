@@ -80,8 +80,29 @@ export function modelsDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS
   return env[MODELS_DIR_ENV] || join(dataDir(env, platform), 'models');
 }
 
+/**
+ * 假清单模式(H3_TEST_MANIFEST_ENV)下载地址必须指向回环地址——这道检查是 2026-10-01 那次
+ * 事故之后补的:早期版本假清单生效但忘了配镜像地址时,会悄悄退回真实 HF 地址,把假清单里
+ * 记的"几KB文件"的 size/sha256 当成真实几GB权重的下载目标,写坏了才发现(sha256 对不上就删掉
+ * 重下一次,等于把真实大文件来回下两遍)。用假清单就必须显式给本机镜像地址,漏配直接报错,
+ * 不允许"悄悄用真实地址"这条路径存在。
+ */
 export function modelUrl(file: ModelFile, env: NodeJS.ProcessEnv = process.env): string {
   const base = env[H3_DOWNLOAD_BASE_ENV]?.trim().replace(/\/+$/, '');
+  if (env[H3_TEST_MANIFEST_ENV]) {
+    if (!base) {
+      throw new Error(`设了 ${H3_TEST_MANIFEST_ENV} 但没设 ${H3_DOWNLOAD_BASE_ENV}:假清单模式必须显式指定本机镜像地址,不会退回真实 Hugging Face 地址。`);
+    }
+    let host: string;
+    try {
+      host = new URL(base).hostname;
+    } catch {
+      throw new Error(`${H3_DOWNLOAD_BASE_ENV} 不是合法地址:${base}`);
+    }
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) {
+      throw new Error(`假清单模式下 ${H3_DOWNLOAD_BASE_ENV} 必须指向回环地址,收到的是:${base}`);
+    }
+  }
   if (base) return `${base}/${file.folder}/${file.fileName}`;
   return `https://huggingface.co/${HF_REPO}/resolve/${HF_REVISION}/${file.folder}/${file.fileName}`;
 }

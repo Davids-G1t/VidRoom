@@ -136,8 +136,15 @@ async function fetchOnce(
 
   let received = append ? offset : 0;
   const progress = new Transform({
+    // 收到的字节数超过清单里记的 size 就立刻中止,不要把响应体整段写完再靠事后 sha256
+    // 校验失败去发现——2026-10-01 的事故就是清单和实际下载地址对不上,response 比 size
+    // 大出几个数量级,当时整份写完才报错,而且报错后还自动删了重下一次。
     transform(chunk: Buffer, _enc, cb) {
       received += chunk.length;
+      if (received > opts.size) {
+        cb(new Error(`下载到的字节数(至少 ${received})超过清单记的 size(${opts.size}),地址和清单对不上,中止`));
+        return;
+      }
       opts.onProgress?.(received, opts.size);
       cb(null, chunk);
     },

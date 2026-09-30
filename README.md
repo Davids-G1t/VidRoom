@@ -55,7 +55,8 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - 准入:显存 ≥24 GiB 默认允许;15–24 GiB 要设 `VIDROOM_H3_EXPERIMENTAL=1`;更低或没有 NVIDIA 显卡不允许。
 - Windows 内存护栏:ComfyUI 放进作业对象(Job Object),整组内存超上限只结束 ComfyUI(退出码 87),Host 不受影响;上限默认「物理内存 − 4 GiB」,`VIDROOM_COMFYUI_MEMORY_LIMIT_MB` 可改(0 = 不设)。
 - 许可义务:成片卡片、详情页、「关于」页标「MiniMax H3」,「关于」页附 NOTICE 原文;使用限制原样转达见 [docs/USE-POLICY.md](docs/USE-POLICY.md);滥用举报流程见 [docs/abuse.md](docs/abuse.md)(菜单「举报滥用」打开 issue 模板)。防滥用靠聊天 LLM 按系统提示词判断意图,不做关键词过滤。仓库里不放任何成片或截帧。
-- 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,要 `VIDROOM_E2E_H3_MODELS_DIR`)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
+- 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,不碰真实权重、不需要真显卡,测试自己起本机假镜像)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
+- 已知问题:权重下载走 Node 的 `fetch`,默认不读系统代理环境变量;连不上 Hugging Face 时(常见于国内网络)要设 `NODE_USE_ENV_PROXY=1` 才会走代理,应用目前不会自动提示这一点,用户会看到下载失败但不知道原因——留给后续批次处理(比如下载失败时给出更明确的排障提示)。
 
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。

@@ -4,7 +4,7 @@ import { downloadVerified, sha256File } from '../comfyui/download.js';
 import { dataDir } from '../comfyui/install.js';
 
 /**
- * MiniMax H3 文生视频要的四个权重文件(官方模板 video_minimax_h3_t2v 的默认组合,见 workflows/README.md)。
+ * MiniMax H3 文生视频要的四个权重文件(官方模板 video_minimax_h3_t2v 的默认组合,见 workflow.ts)。
  *
  * 数值取自 Hugging Face API(2026-10-01 查):
  *   https://huggingface.co/api/models/Comfy-Org/MiniMax-H3/tree/main?recursive=1

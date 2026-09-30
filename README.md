@@ -18,3 +18,21 @@ VidRoom **不自己写生成引擎**。真正的视频/图像生成全部跑在 
 ## 状态
 
 重启中。详见 [docs/decisions.md](docs/decisions.md)。
+
+## 开发
+
+pnpm 单仓:`apps/host`(TypeScript Node Host,只听 `127.0.0.1`)+ `apps/web`(React + Vite 聊天页)。
+
+```bash
+pnpm install
+pnpm build                  # 构建聊天页到 apps/web/dist
+pnpm start                  # 起 Host,控制台打印一次性「启动地址」,用浏览器打开它
+pnpm test                   # 两个包的单元测试
+pnpm test:e2e               # Playwright:不给 key 的页面行为(CI 也跑)
+pnpm test:e2e:gpu           # Playwright:真显卡 + 真 DeepSeek key,只在开发机跑
+```
+
+- 聊天 LLM 第一期走云端 DeepSeek(BYOK)。key **只从文件读**:环境变量 `VIDROOM_DEEPSEEK_KEY_FILE` 给出文件路径;不设或文件不存在时聊天不可用,页面提示去设置。
+- 鉴权:Host 启动时打印 `http://127.0.0.1:<端口>/launch?token=<一次性 token>`;打开后换成 HttpOnly 的 session cookie,token 立即作废。所有 `/api/*` 都要这个 cookie,否则 401。
+- 显卡探测:agent 工具 `probe_gpu` 跑 `nvidia-smi`,按显存分档 —— 没有 NVIDIA 显卡 `none`;< 15 GiB `unsupported`;15–24 GiB `experimental`(MiniMax H3 可用、默认关);≥ 24 GiB `default`。显存按整 GiB 四舍五入后比较(标称 24GB 的卡实报常略少于 24576 MiB)。
+- 端口默认随机,可用 `VIDROOM_PORT` 固定。

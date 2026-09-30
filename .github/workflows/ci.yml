@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # 单元测试;其中真实调用 nvidia-smi 的用例在无显卡的 CI 上应判 none
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium
+
+      # 不给 key 启动 Host,页面提示去设置、预设工作流入口可见
+      - name: E2E (no key)
+        run: pnpm test:e2e
+
+      - name: Host listens on 127.0.0.1 only
+        shell: pwsh
+        working-directory: apps/host
+        run: |
+          $env:VIDROOM_PORT = '47123'
+          Remove-Item Env:VIDROOM_DEEPSEEK_KEY_FILE -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath node -ArgumentList '--import','tsx','src/main.ts' -PassThru -NoNewWindow
+          try {
+            $conns = $null
+            for ($i = 0; $i -lt 30 -and -not $conns; $i++) {
+              Start-Sleep -Seconds 1
+              $conns = Get-NetTCPConnection -State Listen -LocalPort 47123 -ErrorAction SilentlyContinue
+            }
+            if (-not $conns) { throw 'Host 没有在 47123 端口监听' }
+            $conns | Format-Table LocalAddress, LocalPort, OwningProcess
+            $bad = $conns | Where-Object { $_.LocalAddress -ne '127.0.0.1' }
+            if ($bad) { throw "Host 监听了非 127.0.0.1 地址: $($bad.LocalAddress -join ', ')" }
+            $code = (Invoke-WebRequest -Uri http://127.0.0.1:47123/api/status -SkipHttpErrorCheck).StatusCode
+            if ($code -ne 401) { throw "不带 cookie 的 /api/status 应为 401,实际 $code" }
+            Write-Host "OK: 只听 127.0.0.1,不带 cookie 的 API 请求返回 401"
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }

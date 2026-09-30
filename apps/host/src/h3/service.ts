@@ -21,6 +21,7 @@ export const MAX_SECONDS = 15;
 
 export type DownloadState =
   | { state: 'idle' }
+  | { state: 'checking' }
   | { state: 'downloading'; file: string; received: number; total: number }
   | { state: 'done'; downloaded: string[] }
   | { state: 'error'; message: string };
@@ -114,6 +115,7 @@ export class VideoService {
   async startDownload(): Promise<void> {
     if (!(await this.o.consent.get())) throw new Error('还没有同意 MiniMax H3 许可,不能下载');
     if (this.downloading) return;
+    this.download = { state: 'checking' };
     this.downloading = (async () => {
       let file = '';
       try {

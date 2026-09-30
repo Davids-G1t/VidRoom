@@ -15,5 +15,9 @@ export default defineConfig({
     { name: 'desktop', testMatch: /desktop\.spec\.ts/ },
     // 「启动 / 打开 ComfyUI」:默认假 ComfyUI(要 Python),本机和 CI 都跑;设了 VIDROOM_COMFYUI_DIR 就用真的
     { name: 'comfyui', testMatch: /comfyui\.spec\.ts/ },
+    // MiniMax H3 出片全链路(假 ComfyUI 回放 + 假 LLM),开发机跑:要 VIDROOM_E2E_H3_MODELS_DIR 和 15 GiB 以上显存的 NVIDIA 显卡
+    { name: 'h3', testMatch: /h3\.spec\.ts/ },
+    // 滥用测试:真 DeepSeek(VIDROOM_DEEPSEEK_KEY_FILE)+ 假 ComfyUI 回放,开发机跑
+    { name: 'abuse', testMatch: /abuse\.spec\.ts/ },
   ],
 });

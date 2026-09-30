@@ -1,9 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { CAT_PROMPT } from '../apps/host/test/fixtures/h3-prompts';
 
 /**
  * 假 DeepSeek 服务(OpenAI 兼容的 /chat/completions,非流式),给桌面版 e2e 用:
  * - 第一轮让 agent 调 probe_gpu;带着工具结果的第二轮把结果里的 summary 原样说出来;
+ * - 用户消息里带「视频」或「橘猫」:第一轮调 generate_video(固定的 180–260 词英文提示词、5 秒),
+ *   第二轮按工具结果说「已生成」或转述失败原因;
  * - 用户消息里带「慢」字就先挂住,直到测试调 release(),用来模拟「有任务在跑」;
  * - 记下每个请求的 Authorization 头,用来核对 Host 拿到的正是设置页存进去的 key。
  */
@@ -18,6 +21,15 @@ export interface FakeLlm {
 
 interface ChatBody {
   messages: Array<{ role: string; content?: string | null }>;
+}
+
+function videoReply(toolContent: string): string {
+  try {
+    const r = JSON.parse(toolContent);
+    return r.ok ? `已用 MiniMax H3 生成 ${r.video.seconds} 秒的视频,放进作品库了。` : `没能生成:${r.reason}`;
+  } catch {
+    return toolContent;
+  }
 }
 
 const completion = (message: Record<string, unknown>, finishReason: string) => ({
@@ -58,6 +70,22 @@ export async function startFakeLlm(): Promise<FakeLlm> {
     if (lastUser?.content?.includes('慢')) {
       await new Promise<void>((resolve) => waiting.push(resolve));
       reply = completion({ content: '慢任务做完了。' }, 'stop');
+    } else if (/视频|橘猫/.test(lastUser?.content ?? '')) {
+      reply = tool
+        ? completion({ content: videoReply(String(tool.content ?? '')) }, 'stop')
+        : completion(
+            {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_v1',
+                  type: 'function',
+                  function: { name: 'generate_video', arguments: JSON.stringify({ prompt: CAT_PROMPT, seconds: 5 }) },
+                },
+              ],
+            },
+            'tool_calls',
+          );
     } else if (!tool) {
       reply = completion(
         { content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'probe_gpu', arguments: '{}' } }] },

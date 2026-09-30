@@ -49,10 +49,32 @@ async function launch(userDataDir: string, fake: FakeLlm): Promise<Launched> {
   const page = await app.firstWindow();
   const hostPid = async () => {
     let pid: number | null = null;
-    await expect.poll(() => (pid = findHostPid(app.process().pid!)), { timeout: 30_000 }).not.toBeNull();
+    try {
+      await expect.poll(() => (pid = findHostPid(app.process().pid!)), { timeout: 30_000 }).not.toBeNull();
+    } catch (err) {
+      console.log(`[diag] 主进程 pid=${app.process().pid}\n${processTable()}`);
+      throw err;
+    }
     return pid!;
   };
   return { app, page, hostPid, exited };
+}
+
+/** 找不到 Host 时打印进程表,便于排查 */
+function processTable(): string {
+  if (process.platform === 'win32') {
+    const r = spawnSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        `Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*VidRoom*' } | Format-List ProcessId, ParentProcessId, CommandLine`,
+      ],
+      { encoding: 'utf8' },
+    );
+    return r.stdout + r.stderr;
+  }
+  return spawnSync('ps', ['-eo', 'pid,ppid,args'], { encoding: 'utf8' }).stdout;
 }
 
 /** 从操作系统里找 Host:主进程的子进程里,命令行带 host.mjs 的那个 */

@@ -49,6 +49,14 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - Host 把 ComfyUI 当子进程起停:`--listen 127.0.0.1`、端口每次取一个空闲的、`--disable-auto-launch`;轮询 `/system_stats` 到就绪;检查 ComfyUI ≥ 0.30.0、PyTorch CUDA ≥ 13.0。「打开 ComfyUI」在系统默认浏览器里开 `http://127.0.0.1:<端口>/`。
 - 停止:ComfyUI 没有关闭服务的 HTTP 接口,它的正常退出路径是 Ctrl+C。Linux 上给进程组发 SIGINT,10 秒不退再 SIGKILL;Windows 上没有信号可发(Node 的 `kill()` 就是强杀),改为关 stdin 让 ComfyUI 进程里的引导代码模拟 Ctrl+C,10 秒不退再 `taskkill /T /F`。Host 这样主动退出、或被 CLI 强杀时,ComfyUI 发现 stdin 断了会走这条路自己退出。Windows 桌面版走的是另一条路:Electron 退出时连带强杀 ComfyUI 所在的 Windows 作业对象,更快、不经过 stdin 检测,同样不留孤儿,但不是「优雅退出」,是直接强杀(细节见 `apps/host/src/comfyui/process.ts` 顶部注释)。
 
+出片(MiniMax H3,`apps/host/src/h3/`):
+- 页面上点「出片」:第一次先弹许可同意页(中文摘要 + [许可全文](apps/web/public/licenses/MiniMax-H3-LICENSE.txt)),勾选同意才下载;同意记录(许可文件 sha256 + 同意时间)存在数据目录的 `h3-consent.json`。之后补齐四个权重(清单与 HF API 核对的 size/sha256 在 `models.ts`,钉在 HF commit 上),本地已有且 sha256 对得上的跳过。模型目录 `VIDROOM_MODELS_DIR`(默认 `<数据目录>/models`),经 `--extra-model-paths-config` 告诉 ComfyUI;换镜像 `VIDROOM_H3_DOWNLOAD_BASE`。命令行核对/补齐:`pnpm --filter @vidroom/host h3:models [-- --download]`。
+- 在聊天里说想要什么视频,助手调 `generate_video`:自己写 180–260 词英文提示词,时长按 24 fps 吸附到 17k+5 帧;工作流是锁定 commit 的官方模板 `video_minimax_h3_t2v.json` 转成的 API 格式(`workflows/h3-t2v.json`,来源写在文件里);进度从 ComfyUI 的 WebSocket 转到聊天页;成片进作品库(`<数据目录>/library/videos.json` + MP4),MP4 元数据写 `AI-generated with MiniMax H3`。
+- 准入:显存 ≥24 GiB 默认允许;15–24 GiB 要设 `VIDROOM_H3_EXPERIMENTAL=1`;更低或没有 NVIDIA 显卡不允许。
+- Windows 内存护栏:ComfyUI 放进作业对象(Job Object),整组内存超上限只结束 ComfyUI(退出码 87),Host 不受影响;上限默认「物理内存 − 4 GiB」,`VIDROOM_COMFYUI_MEMORY_LIMIT_MB` 可改(0 = 不设)。
+- 许可义务:成片卡片、详情页、「关于」页标「MiniMax H3」,「关于」页附 NOTICE 原文;使用限制原样转达见 [docs/USE-POLICY.md](docs/USE-POLICY.md);滥用举报流程见 [docs/abuse.md](docs/abuse.md)(菜单「举报滥用」打开 issue 模板)。防滥用靠聊天 LLM 按系统提示词判断意图,不做关键词过滤。仓库里不放任何成片或截帧。
+- 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,要 `VIDROOM_E2E_H3_MODELS_DIR`)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
+
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。
 - Host 是主进程用 `ELECTRON_RUN_AS_NODE=1` fork 出来的子进程(复用 Electron 自带的 Node)。页面的 `/api` 请求由协议处理器带上 session cookie 转发给 Host,页面看不到启动地址和 cookie。

@@ -146,7 +146,13 @@ export async function startHost(opts: HostOptions): Promise<Host> {
   }
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    } catch {
+      sendJson(res, 400, { error: 'bad_request' });
+      return;
+    }
     const pathname = url.pathname;
 
     const done = (p: Promise<void>) =>

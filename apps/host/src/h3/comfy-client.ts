@@ -91,6 +91,8 @@ export class ComfySession {
     const done = new Promise<void>((resolve, reject) => {
       settle = (err) => (err ? reject(err) : resolve());
     });
+    // 提交还没返回时就可能被取消/断线:先挂个空处理,免得成了「未处理的 rejection」;下面照样 await 它
+    done.catch(() => {});
     let node: string | null = null;
     const handle = (msg: { type: string; data: Record<string, unknown> }) => {
       const d = msg.data ?? {};

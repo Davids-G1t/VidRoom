@@ -27,8 +27,8 @@ describe('内存上限默认值', () => {
 
 describe('引导代码', () => {
   it('是能编译的 Python(含作业对象护栏)', () => {
-    const r = spawnSync(python, ['-c', 'import sys; compile(sys.stdin.read(), "<bootstrap>", "exec")'], {
-      input: BOOTSTRAP,
+    const r = spawnSync(python, ['-c', 'import sys; compile(sys.stdin.buffer.read().decode("utf-8"), "<bootstrap>", "exec")'], {
+      input: Buffer.from(BOOTSTRAP, 'utf8'),
       encoding: 'utf8',
     });
     expect(r.stderr).toBe('');

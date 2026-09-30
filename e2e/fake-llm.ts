@@ -7,7 +7,7 @@ import { CAT_PROMPT } from '../apps/host/test/fixtures/h3-prompts';
  * - 第一轮让 agent 调 probe_gpu;带着工具结果的第二轮把结果里的 summary 原样说出来;
  * - 用户消息里带「视频」或「橘猫」:第一轮调 generate_video(固定的 180–260 词英文提示词、5 秒),
  *   第二轮按工具结果说「已生成」或转述失败原因;
- * - 用户消息里带「慢」字就先挂住,直到测试调 release(),用来模拟「有任务在跑」;
+ * - 用户消息以「慢」字开头就先挂住,直到测试调 release(),用来模拟「有任务在跑」;
  * - 记下每个请求的 Authorization 头,用来核对 Host 拿到的正是设置页存进去的 key。
  */
 export interface FakeLlm {
@@ -67,7 +67,7 @@ export async function startFakeLlm(): Promise<FakeLlm> {
     const tool = body.messages.find((m) => m.role === 'tool');
 
     let reply;
-    if (lastUser?.content?.includes('慢')) {
+    if (lastUser?.content?.startsWith('慢')) {
       await new Promise<void>((resolve) => waiting.push(resolve));
       reply = completion({ content: '慢任务做完了。' }, 'stop');
     } else if (/视频|橘猫/.test(lastUser?.content ?? '')) {

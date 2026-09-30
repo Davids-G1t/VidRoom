@@ -165,10 +165,14 @@ jobs:
   comfyui:
     runs-on: windows-latest
     timeout-minutes: 60
-    env:
-      VIDROOM_DATA_DIR: ${{ runner.temp }}\vidroom-data
     steps:
       - uses: actions/checkout@v4
+
+      # 便携包下载与解压的数据目录(job 级 env 里用不了 runner 上下文,这里写进 GITHUB_ENV)
+      - name: Set data dir
+        shell: pwsh
+        run: |
+          "VIDROOM_DATA_DIR=$(Join-Path $env:RUNNER_TEMP 'vidroom-data')" >> $env:GITHUB_ENV
 
       - uses: pnpm/action-setup@v4
 

@@ -91,6 +91,10 @@ export class VideoService {
     return this.current;
   }
 
+  library(): VideoLibrary {
+    return this.o.library;
+  }
+
   async status(opts: { inspectModels?: boolean } = {}): Promise<H3Status> {
     const gpu = await this.o.probeGpu();
     return {

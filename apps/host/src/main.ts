@@ -1,6 +1,13 @@
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDeepSeekModel } from './agent.js';
+import { dataDir } from './comfyui/install.js';
 import { ComfyManager, parseExtraArgs } from './comfyui/manager.js';
+import { probeGpu } from './gpu.js';
+import { ConsentStore } from './h3/license.js';
+import { VideoLibrary } from './h3/library.js';
+import { ModelStore, modelsDir, writeExtraModelPaths } from './h3/models.js';
+import { VideoService } from './h3/service.js';
 import { KEY_FILE_ENV, loadDeepSeekKey } from './key.js';
 import { parseParentMessage, type HostToParent } from './parent-ipc.js';
 import { startHost } from './server.js';
@@ -9,8 +16,22 @@ const webDir = process.env.VIDROOM_WEB_DIR ?? fileURLToPath(new URL('../../web/d
 const port = Number(process.env.VIDROOM_PORT ?? 0);
 const baseURL = process.env.VIDROOM_DEEPSEEK_BASE_URL || undefined;
 
-// ComfyUI 只在用户点「启动 ComfyUI」时才找/下载/起;VIDROOM_COMFYUI_ARGS 给它加参数(如 --cpu)
-const comfy = new ComfyManager({ extraArgs: parseExtraArgs(process.env.VIDROOM_COMFYUI_ARGS) });
+// ComfyUI 只在用户点「启动 ComfyUI」或第一次出片时才找/下载/起;VIDROOM_COMFYUI_ARGS 给它加参数(如 --cpu)。
+// 模型目录和 ComfyUI 本体分开放,经 --extra-model-paths-config 告诉 ComfyUI 去哪找权重。
+const data = dataDir();
+const models = modelsDir();
+const extraModelPaths = join(data, 'extra_model_paths.yaml');
+await writeExtraModelPaths(extraModelPaths, models);
+const comfy = new ComfyManager({
+  extraArgs: ['--extra-model-paths-config', extraModelPaths, ...parseExtraArgs(process.env.VIDROOM_COMFYUI_ARGS)],
+});
+const video = new VideoService({
+  comfy,
+  models: new ModelStore(models, join(data, 'cache', 'model-sha256.json')),
+  consent: new ConsentStore(join(data, 'h3-consent.json')),
+  library: new VideoLibrary(join(data, 'library')),
+  probeGpu: () => probeGpu(),
+});
 
 const modelFor = (apiKey: string | null) => (apiKey ? createDeepSeekModel(apiKey, baseURL) : null);
 
@@ -33,7 +54,7 @@ if (process.send) {
     const secrets = msg.apiKey ? [msg.apiKey] : [];
     if (host === null) {
       // 第一条 set-key 到了才起服务,页面第一次查状态时 key 已就位
-      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets, comfy });
+      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets, comfy, video });
       send({ type: 'ready', launchUrl: host.launchUrl });
     } else {
       host.setModel(modelFor(msg.apiKey), secrets);
@@ -61,7 +82,7 @@ if (process.send) {
   process.on('SIGINT', shutdown);
 } else {
   const apiKey = loadDeepSeekKey();
-  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy });
+  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video });
 
   if (!apiKey) {
     console.log(`[vidroom] 没有配置 DeepSeek API key(环境变量 ${KEY_FILE_ENV} 未设置或文件不存在),聊天功能不可用。`);

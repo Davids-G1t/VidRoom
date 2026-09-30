@@ -12,6 +12,7 @@ import { ConsentStore, H3_LICENSE } from '../src/h3/license.js';
 import { VideoLibrary } from '../src/h3/library.js';
 import { ModelStore, type ModelFile } from '../src/h3/models.js';
 import { VideoService, checkPrompt, countWords } from '../src/h3/service.js';
+import { CAT_PROMPT } from './fixtures/h3-prompts.js';
 
 /**
  * 出片服务 + 假 ComfyUI 回放(fixtures/fake-comfyui:Python 标准库 + ffmpeg testsrc 占位)。
@@ -21,18 +22,7 @@ import { VideoService, checkPrompt, countWords } from '../src/h3/service.js';
 const fakeDir = fileURLToPath(new URL('./fixtures/fake-comfyui', import.meta.url));
 const python = process.env.VIDROOM_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
 
-export const CAT_PROMPT = [
-  'A plump ginger tabby cat lies stretched out on a sunlit wooden windowsill in a quiet apartment on a late spring afternoon.',
-  'Warm golden light pours through the clear glass and falls across its soft striped fur, lighting every whisker and the tips of its ears.',
-  'The cat is calm and relaxed, eyes half closed, chest rising and falling slowly as it breathes, tail curled loosely around its front paws.',
-  'Outside the window, blurred green leaves sway gently in a light breeze, and small patches of blue sky appear between distant rooftops.',
-  'The camera starts in a wide shot that shows the whole window frame, a small potted plant and a folded cream curtain on the left side,',
-  'then pushes in very slowly and smoothly toward the cat until its face and front paws fill most of the frame.',
-  'Dust motes drift and sparkle in the beam of sunlight. The cat opens its eyes briefly, blinks lazily at the lens, and settles back down.',
-  'The mood is peaceful, cozy and intimate, with soft natural colors, gentle contrast and a shallow depth of field that keeps the background soft.',
-  'Realistic live-action look, steady handheld-free dolly movement, natural motion, clean frame without any text or graphics.',
-  'Audio: quiet room tone, faint birdsong from outside, the soft rhythmic purring of the cat growing a little louder as the camera arrives close to it.',
-].join(' ');
+
 
 function smallModels(dir: string): ModelFile[] {
   const files: ModelFile[] = [];

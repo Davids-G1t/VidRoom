@@ -47,7 +47,7 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - **Linux**:不下载。环境变量 `VIDROOM_COMFYUI_DIR` 指向已装好的 ComfyUI(有 `main.py` 的目录),python 默认用目录下的 `venv/`、`.venv/`,或用 `VIDROOM_COMFYUI_PYTHON` 指定。
 - 其它环境变量:`VIDROOM_COMFYUI_ARGS`(给 ComfyUI 加参数,如 `--cpu`)、`VIDROOM_DATA_DIR`(数据目录)。
 - Host 把 ComfyUI 当子进程起停:`--listen 127.0.0.1`、端口每次取一个空闲的、`--disable-auto-launch`;轮询 `/system_stats` 到就绪;检查 ComfyUI ≥ 0.30.0、PyTorch CUDA ≥ 13.0。「打开 ComfyUI」在系统默认浏览器里开 `http://127.0.0.1:<端口>/`。
-- 停止:ComfyUI 没有关闭服务的 HTTP 接口,它的正常退出路径是 Ctrl+C。Linux 上给进程组发 SIGINT,10 秒不退再 SIGKILL;Windows 上没有信号可发(Node 的 `kill()` 就是强杀),改为关 stdin 让 ComfyUI 进程里的引导代码模拟 Ctrl+C,10 秒不退再 `taskkill /T /F`。Host 无论怎么退出(包括被强杀),ComfyUI 发现 stdin 断了都会自己退出,不留孤儿进程。
+- 停止:ComfyUI 没有关闭服务的 HTTP 接口,它的正常退出路径是 Ctrl+C。Linux 上给进程组发 SIGINT,10 秒不退再 SIGKILL;Windows 上没有信号可发(Node 的 `kill()` 就是强杀),改为关 stdin 让 ComfyUI 进程里的引导代码模拟 Ctrl+C,10 秒不退再 `taskkill /T /F`。Host 这样主动退出、或被 CLI 强杀时,ComfyUI 发现 stdin 断了会走这条路自己退出。Windows 桌面版走的是另一条路:Electron 退出时连带强杀 ComfyUI 所在的 Windows 作业对象,更快、不经过 stdin 检测,同样不留孤儿,但不是「优雅退出」,是直接强杀(细节见 `apps/host/src/comfyui/process.ts` 顶部注释)。
 
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。

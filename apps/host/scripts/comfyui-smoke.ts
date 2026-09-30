@@ -29,12 +29,22 @@ const { values: opts } = parseArgs({
   args: process.argv.slice(2).filter((a) => a !== '--'),
   options: {
     cpu: { type: 'boolean', default: false },
+    gpu: { type: 'boolean', default: false },
     'expect-device': { type: 'string' },
     'interrupt-download-at': { type: 'string' },
     'install-only': { type: 'boolean', default: false },
     hold: { type: 'string' },
   },
 });
+
+// 2026-10-01 的教训(codereview 第3a批指出的 F1):默认值不能悄悄用显卡。
+// 起真 ComfyUI 要么显式 --cpu、要么显式 --gpu,两个都不给就直接报错退出——
+// 不要猜、不要"没说就当作 CPU 更安全所以默认CPU",因为这脚本本来就是给人在命令行
+// 手打的,漏敲一个字符是常见失误,报错比"悄悄选了一个默认值"更容易被人当场发现。
+if (!opts.cpu && !opts.gpu && !opts['install-only']) {
+  console.error('必须显式指定 --cpu 或 --gpu(起真 ComfyUI 前必须明确选择,不接受默认值)。');
+  process.exit(1);
+}
 
 const failures: string[] = [];
 const check = (ok: boolean, what: string) => {

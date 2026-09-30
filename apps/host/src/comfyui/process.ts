@@ -12,7 +12,10 @@ import type { SystemStats } from './versions.js';
  * - 起来后轮询 /system_stats,拿到 200 才算就绪。
  * - 不直接跑 main.py,而是用一小段引导代码(BOOTSTRAP)包一层:它开一个线程一直读 stdin,
  *   stdin 一断(Host 退出、崩溃、被强杀,管道都会断)就先模拟 Ctrl+C 让 ComfyUI 走自己的退出流程,
- *   GRACE 秒后还没退就 os._exit —— Host 怎么死的都不会留下 ComfyUI 孤儿进程。
+ *   GRACE 秒后还没退就 os._exit。**这是 Host 自身退出(CLI 下 kill、崩溃)时的防护路径**——
+ *   Windows 桌面版走的是另一条路:Electron 退出时把 ComfyUI 所在的 Windows 作业对象
+ *   (job object)连带强杀,这条路径更快、先于 stdin 检测生效,结果同样是不留孤儿,
+ *   但走的不是这里描述的「模拟 Ctrl+C 优雅退出」,而是直接强杀(见 codereview 第3a批 F3)。
  *
  * 停止(stop):
  * - ComfyUI v0.38.0 没有「关闭服务」的 HTTP 接口(路由里只有 /interrupt 打断当前任务、/free 释放显存),

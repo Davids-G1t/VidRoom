@@ -5,8 +5,12 @@ import { envWithoutKey, startHostProcess } from './host';
 
 /**
  * 浏览器里的「启动 / 打开 ComfyUI」:点「打开 ComfyUI」弹出的新页面地址必须是 http://127.0.0.1:<ComfyUI 端口>/。
- * 默认用假 ComfyUI(Python 标准库);环境里已设 VIDROOM_COMFYUI_DIR 时用那份真 ComfyUI
- * (再设 VIDROOM_COMFYUI_ARGS=--cpu 可不占显卡)。
+ * 默认用假 ComfyUI(Python 标准库);环境里已设 VIDROOM_COMFYUI_DIR 时用那份真 ComfyUI。
+ *
+ * 2026-10-01 的教训(codereview 第3a批 F1):不能只靠"记得加 VIDROOM_COMFYUI_ARGS=--cpu"这种
+ * 约定来防止意外占用显卡——漏设就会悄悄用真显卡跑。改成:设了 VIDROOM_COMFYUI_DIR 但没有
+ * 同时设 VIDROOM_COMFYUI_ARGS 包含 --cpu、又没有显式设 VIDROOM_COMFYUI_ALLOW_GPU=1 时,
+ * 直接报错退出,不静默用显卡。
  */
 const fakeComfyDir = fileURLToPath(new URL('../apps/host/test/fixtures/fake-comfyui', import.meta.url));
 
@@ -16,6 +20,11 @@ test('点「打开 ComfyUI」打开的是 http://127.0.0.1:<端口>/;停掉 Host
   if (!env.VIDROOM_COMFYUI_DIR) {
     env.VIDROOM_COMFYUI_DIR = fakeComfyDir;
     env.VIDROOM_COMFYUI_PYTHON = env.VIDROOM_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+  } else if (!(env.VIDROOM_COMFYUI_ARGS ?? '').includes('--cpu') && env.VIDROOM_COMFYUI_ALLOW_GPU !== '1') {
+    throw new Error(
+      '设了 VIDROOM_COMFYUI_DIR(会用真 ComfyUI)但没有 VIDROOM_COMFYUI_ARGS=--cpu,也没有显式设 ' +
+        'VIDROOM_COMFYUI_ALLOW_GPU=1。为避免悄悄占用真显卡,拒绝运行——要么加 --cpu,要么显式确认要用显卡。',
+    );
   }
   const host = await startHostProcess(env);
   let comfyPid = 0;

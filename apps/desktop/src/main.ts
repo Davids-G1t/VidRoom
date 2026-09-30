@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { BrowserWindow, app, dialog, ipcMain, protocol, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron';
+import { BrowserWindow, Menu, app, dialog, ipcMain, protocol, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron';
+import { ABUSE_REPORT_URL } from '../../web/src/api.js';
 import { handleAppRequest } from './app-protocol.js';
 import { comfyUrlFromStatus } from './comfy-url.js';
 import { HostProcess } from './host-process.js';
@@ -27,8 +28,25 @@ const hostEnv: Record<string, string> =
 const host = new HostProcess({ script: hostScript, webDir, env: hostEnv, log });
 let keyStore: KeyStore;
 
-/** 粗略的「有任务在跑」:正在转发中的聊天请求数(第 3 批有了任务队列再换成真的任务状态) */
+/** 正在转发中的聊天请求数(出片在 generate_video 工具里跑,也算在聊天请求里) */
 let chatsInFlight = 0;
+
+/** 有没有任务在跑:聊天请求挂着,或 Host 报告正在出片 */
+async function taskRunning(): Promise<boolean> {
+  if (chatsInFlight > 0) return true;
+  try {
+    const res = await host.fetchApi('/api/video/job', { method: 'GET' });
+    const job = res.ok ? ((await res.json()) as { state?: string }) : null;
+    return job?.state === 'preparing' || job?.state === 'running';
+  } catch {
+    return false;
+  }
+}
+
+function openAbuseReport(): Promise<void> {
+  log(`[vidroom-desktop] 打开举报滥用页 ${ABUSE_REPORT_URL}`);
+  return shell.openExternal(ABUSE_REPORT_URL);
+}
 
 /** 所有 IPC handler 都经这里注册:先核来源,不可信就拒绝并记日志 */
 function handleTrusted<T>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => T | Promise<T>): void {
@@ -64,6 +82,30 @@ function registerIpc(): void {
     log(`[vidroom-desktop] 在系统浏览器里打开 ${url}`);
     return { ok: true, url };
   });
+
+  handleTrusted(IPC.openAbuseReport, () => openAbuseReport());
+}
+
+/** 应用菜单:「帮助 → 举报滥用」打开 GitHub 上的举报 issue 模板 */
+function setupMenu(): void {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { label: '文件', submenu: [{ role: 'quit', label: '退出' }] },
+      {
+        label: '编辑',
+        submenu: [
+          { role: 'undo', label: '撤销' },
+          { role: 'redo', label: '重做' },
+          { type: 'separator' },
+          { role: 'cut', label: '剪切' },
+          { role: 'copy', label: '复制' },
+          { role: 'paste', label: '粘贴' },
+          { role: 'selectAll', label: '全选' },
+        ],
+      },
+      { label: '帮助', submenu: [{ id: 'abuse-report', label: '举报滥用', click: () => void openAbuseReport() }] },
+    ]),
+  );
 }
 
 function createWindow(): BrowserWindow {
@@ -85,27 +127,32 @@ function createWindow(): BrowserWindow {
   let allowClose = false;
   let asking = false;
   win.on('close', (event) => {
-    if (allowClose || chatsInFlight === 0) return;
+    if (allowClose) return;
     event.preventDefault();
     if (asking) return;
     asking = true;
-    void dialog
-      .showMessageBox(win, {
-        type: 'warning',
-        title: 'VidRoom',
-        message: '还有任务在进行,确定要关闭吗?',
-        detail: '关闭后正在进行的任务会中断。',
-        buttons: ['仍然关闭', '取消'],
-        defaultId: 1,
-        cancelId: 1,
-      })
-      .then(({ response }) => {
-        asking = false;
-        if (response === 0) {
-          allowClose = true;
-          win.close();
+    void (async () => {
+      try {
+        if (await taskRunning()) {
+          const { response } = await dialog.showMessageBox(win, {
+            type: 'warning',
+            title: 'VidRoom',
+            message: '还有任务在进行,确定要关闭吗?',
+            detail: '关闭后正在进行的任务会中断,正在生成的视频不会保存。',
+            buttons: ['仍然关闭', '取消'],
+            defaultId: 1,
+            cancelId: 1,
+          });
+          if (response !== 0) return;
+          // 确认关闭:先让 Host 打断出片任务并停掉 ComfyUI,再关窗
+          await host.fetchApi('/api/video/cancel', { method: 'POST' }).catch(() => {});
         }
-      });
+        allowClose = true;
+        win.close();
+      } finally {
+        asking = false;
+      }
+    })();
   });
 
   void win.loadURL(APP_ENTRY_URL);
@@ -153,6 +200,7 @@ app.whenReady().then(async () => {
   );
 
   registerIpc();
+  setupMenu();
   await host.start(keyStore.load());
   createWindow();
 }).catch((err) => {

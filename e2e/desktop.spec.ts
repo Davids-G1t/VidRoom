@@ -171,13 +171,13 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
     await expect(page.getByTestId('no-key-notice')).toBeVisible();
     await expect(page.getByTestId('preset-workflows')).toBeVisible();
 
-    // 安全边界:页面里没有 Node,桥上只有两个函数;窗口的 webPreferences 如设计
+    // 安全边界:页面里没有 Node,桥上只有这四个函数;窗口的 webPreferences 如设计
     const surface = await page.evaluate(() => ({
       require: typeof (globalThis as { require?: unknown }).require,
       process: typeof (globalThis as { process?: unknown }).process,
       bridge: Object.keys((window as unknown as { vidroom: object }).vidroom).sort(),
     }));
-    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openComfyUI', 'setKey'] });
+    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openAbuseReport', 'openComfyUI', 'setKey'] });
     const prefs = await first.app.evaluate(({ BrowserWindow }) => {
       const p = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
       return { sandbox: p?.sandbox, contextIsolation: p?.contextIsolation, nodeIntegration: p?.nodeIntegration };

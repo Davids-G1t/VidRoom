@@ -42,8 +42,9 @@ export function createTools(runNvidiaSmi?: RunNvidiaSmi) {
   };
 }
 
-export function createDeepSeekModel(apiKey: string): LanguageModel {
-  return createDeepSeek({ apiKey })(DEEPSEEK_MODEL);
+/** baseURL 只给测试接假 LLM 服务用;不给就是 DeepSeek 官方地址 */
+export function createDeepSeekModel(apiKey: string, baseURL?: string): LanguageModel {
+  return createDeepSeek({ apiKey, baseURL })(DEEPSEEK_MODEL);
 }
 
 export async function runChat(

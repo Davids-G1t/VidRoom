@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { fetchStatus, sendChat, type ChatMessage, type StatusResult, type ToolCallRecord } from './api';
+import { Settings } from './Settings';
 
 interface Entry extends ChatMessage {
   toolCalls?: ToolCallRecord[];
@@ -14,6 +15,7 @@ export function App() {
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     fetchStatus().then(setStatus);
@@ -48,6 +50,9 @@ export function App() {
     <div className="app">
       <header>
         <h1>VidRoom</h1>
+        <button type="button" onClick={() => setSettingsOpen((open) => !open)}>
+          设置
+        </button>
       </header>
 
       {status?.kind === 'unauthorized' && (
@@ -63,10 +68,20 @@ export function App() {
       {noKey && (
         <div className="banner" role="alert" data-testid="no-key-notice">
           {NO_KEY_TEXT}{' '}
-          <a href="#settings" onClick={() => setNotice('设置页将在下一版提供。')}>
+          <a
+            href="#settings"
+            onClick={(e) => {
+              e.preventDefault();
+              setSettingsOpen(true);
+            }}
+          >
             去设置
           </a>
         </div>
+      )}
+
+      {settingsOpen && (
+        <Settings onSaved={() => fetchStatus().then(setStatus)} onClose={() => setSettingsOpen(false)} />
       )}
 
       <section className="presets" data-testid="preset-workflows" aria-label="预设工作流">

@@ -1,0 +1,30 @@
+# Windows 安装包:未签名的 NSIS,按当前用户安装、不要管理员权限
+appId: org.vidroom.desktop
+productName: VidRoom
+executableName: VidRoom
+artifactName: VidRoom-Setup-${version}.${ext}
+directories:
+  output: release
+# 主进程和 preload 已由 esbuild 打成单文件;运行时没有 npm 依赖要带
+files:
+  - dist/main.cjs
+  - dist/preload.cjs
+  - package.json
+# Host 要被 ELECTRON_RUN_AS_NODE 的子进程当普通文件读,放在 asar 外面;聊天页一起放
+extraResources:
+  - from: dist/host
+    to: host
+  - from: ../web/dist
+    to: web
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  # 让用户自己选安装选项(不是一键装);默认按当前用户装进 %LOCALAPPDATA%\Programs,只写 HKCU
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+publish: null

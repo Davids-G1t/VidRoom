@@ -57,3 +57,100 @@ jobs:
           } finally {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           }
+
+  # 桌面版:打未签名 NSIS 安装包 → /S 静默安装 → Playwright 驱动装好的 VidRoom.exe 跑端到端
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Package NSIS installer
+        run: pnpm --filter @vidroom/desktop dist --win --x64
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: VidRoom-Setup
+          path: apps/desktop/release/VidRoom-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Silent install (/S) into current user, no HKLM
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem apps/desktop/release/VidRoom-Setup-*.exe | Select-Object -First 1
+          Write-Host "安装包: $($setup.Name) ($($setup.Length) 字节)"
+
+          # 安装包清单里要求的权限级别:asInvoker = 不要求管理员
+          $manifest = [regex]::Match([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($setup.FullName)), 'requestedExecutionLevel\s+level="(\w+)"')
+          Write-Host "requestedExecutionLevel = $($manifest.Groups[1].Value)"
+          if ($manifest.Groups[1].Value -ne 'asInvoker') { throw "安装包要求的权限级别不是 asInvoker" }
+
+          $uninstallPaths = @(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+          )
+          function Find-VidRoomUninstallKeys([string]$hive) {
+            foreach ($p in $uninstallPaths) {
+              Get-ChildItem "${hive}:\$p" -ErrorAction SilentlyContinue |
+                Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -like 'VidRoom*' }
+            }
+          }
+          if (Find-VidRoomUninstallKeys 'HKLM') { throw '安装前 HKLM 里就已经有 VidRoom,环境不干净' }
+
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "静默安装退出码 $($p.ExitCode)" }
+
+          $installDir = Join-Path $env:LOCALAPPDATA 'Programs\VidRoom'
+          $appExe = Join-Path $installDir 'VidRoom.exe'
+          if (-not (Test-Path $appExe)) { throw "没有装到当前用户目录: $appExe 不存在" }
+          Write-Host "OK: 装在当前用户目录 $installDir"
+          Get-ChildItem $installDir | Format-Table Name, Length
+          if (-not (Test-Path (Join-Path $installDir 'resources\host\host.mjs'))) { throw 'Host 没有打进安装包' }
+          if (-not (Test-Path (Join-Path $installDir 'resources\web\index.html'))) { throw '聊天页没有打进安装包' }
+
+          $hkcu = @(Find-VidRoomUninstallKeys 'HKCU')
+          if ($hkcu.Count -ne 1) { throw "HKCU 里的 VidRoom 卸载项应为 1 个,实际 $($hkcu.Count)" }
+          $guid = $hkcu[0].PSChildName
+          Get-ItemProperty $hkcu[0].PSPath | Format-List DisplayName, DisplayVersion, InstallLocation, UninstallString
+          $hklm = @(Find-VidRoomUninstallKeys 'HKLM')
+          if ($hklm.Count -ne 0) { throw "HKLM 里出现了 VidRoom 卸载项: $($hklm.Name -join ', ')" }
+          foreach ($k in @("HKLM:\SOFTWARE\$guid", "HKLM:\SOFTWARE\WOW6432Node\$guid", 'HKLM:\SOFTWARE\VidRoom', 'HKLM:\SOFTWARE\WOW6432Node\VidRoom')) {
+            if (Test-Path $k) { throw "HKLM 里出现了 $k" }
+          }
+          Write-Host "OK: 卸载项只在 HKCU($guid),HKLM 里没有 VidRoom 的键"
+
+          "VIDROOM_DESKTOP_EXE=$appExe" >> $env:GITHUB_ENV
+
+      # Electron 不用另装浏览器;驱动的是上一步装好的 VidRoom.exe
+      - name: E2E desktop (Playwright drives installed VidRoom.exe)
+        run: pnpm exec playwright test --project=desktop
+
+      - name: No VidRoom process left
+        if: always()
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 2
+          $left = Get-Process -Name VidRoom -ErrorAction SilentlyContinue
+          $left | Format-Table Id, ProcessName, Path
+          if ($left) { throw "还有 $($left.Count) 个 VidRoom 进程没退出" }
+          Write-Host 'OK: Get-Process 里没有 VidRoom 进程'
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e-screenshots
+          path: test-results/
+          if-no-files-found: ignore

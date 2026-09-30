@@ -109,3 +109,37 @@ button {
 button:disabled {
   cursor: not-allowed;
 }
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings {
+  border: 1px solid #8884;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.settings form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings input {
+  min-width: 320px;
+  font: inherit;
+  padding: 6px 8px;
+}

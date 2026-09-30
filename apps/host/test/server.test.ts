@@ -146,6 +146,39 @@ describe('聊天接口', () => {
     expect(body.text).toContain('RTX 4060 Ti');
   });
 
+  it('setModel:没 key 起的 Host 换上模型后状态变成有 key、聊天可用;新 key 同样会被抹掉', async () => {
+    const h = await start({ model: null });
+    const cookie = await login(h);
+    const status = async () => (await (await fetch(`${base(h)}/api/status`, { headers: { cookie } })).json()).hasApiKey;
+    expect(await status()).toBe(false);
+
+    const secret = 'FAKE_KEY_set_later_77';
+    const errors: string[] = [];
+    const failing = new MockLanguageModelV4({
+      doGenerate: async () => {
+        throw new Error(`bad key ${secret}`);
+      },
+    });
+    h.setModel(failing, [secret]);
+    expect(await status()).toBe(true);
+    const origError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.map(String).join(' '));
+    try {
+      const res = await fetch(`${base(h)}/api/chat`, {
+        method: 'POST',
+        headers: { cookie },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      expect(res.status).toBe(502);
+    } finally {
+      console.error = origError;
+    }
+    expect(errors.join('\n')).not.toContain(secret);
+
+    h.setModel(null, []);
+    expect(await status()).toBe(false);
+  });
+
   it('请求格式不对 → 400', async () => {
     const h = await start({ model: toolCallingModel() });
     const cookie = await login(h);

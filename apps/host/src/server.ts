@@ -27,6 +27,8 @@ export interface Host {
   server: Server;
   port: number;
   launchUrl: string;
+  /** 换模型(桌面壳在设置页存了新 key 时调用);需要抹掉的秘密一并换掉 */
+  setModel(model: LanguageModel | null, secrets: string[]): void;
   close(): Promise<void>;
 }
 
@@ -79,7 +81,8 @@ function redact(text: string, secrets: string[]): string {
 export async function startHost(opts: HostOptions): Promise<Host> {
   const auth = new LaunchAuth();
   const webRoot = resolve(opts.webDir);
-  const secrets = opts.secrets ?? [];
+  let model = opts.model;
+  let secrets = opts.secrets ?? [];
 
   async function serveStatic(pathname: string, res: ServerResponse): Promise<void> {
     const rel = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, '');
@@ -113,12 +116,12 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     }
 
     if (pathname === '/api/status' && req.method === 'GET') {
-      sendJson(res, 200, { hasApiKey: opts.model !== null });
+      sendJson(res, 200, { hasApiKey: model !== null });
       return;
     }
 
     if (pathname === '/api/chat' && req.method === 'POST') {
-      if (opts.model === null) {
+      if (model === null) {
         sendJson(res, 503, { error: 'no_api_key', message: NO_KEY_MESSAGE });
         return;
       }
@@ -133,7 +136,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
         return;
       }
       try {
-        const reply = await runChat(opts.model, messages, opts.runNvidiaSmi);
+        const reply = await runChat(model, messages, opts.runNvidiaSmi);
         sendJson(res, 200, reply);
       } catch (err) {
         console.error('[vidroom] 调用 LLM 失败:', redact(err instanceof Error ? err.message : String(err), secrets));
@@ -196,6 +199,10 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     server,
     port,
     launchUrl: `http://${LISTEN_HOST}:${port}/launch?token=${auth.token}`,
+    setModel: (m, s) => {
+      model = m;
+      secrets = s;
+    },
     close: () => new Promise((ok, fail) => server.close((e) => (e ? fail(e) : ok()))),
   };
 }

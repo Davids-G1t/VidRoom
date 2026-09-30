@@ -11,5 +11,7 @@ export default defineConfig({
     { name: 'no-key', testMatch: /no-key\.spec\.ts/ },
     // 需要真显卡 + 真 DeepSeek key(VIDROOM_DEEPSEEK_KEY_FILE),只在开发机跑
     { name: 'gpu', testMatch: /gpu-chat\.spec\.ts/ },
+    // Playwright 驱动 Electron 桌面版;CI 上驱动静默安装好的 exe(VIDROOM_DESKTOP_EXE)
+    { name: 'desktop', testMatch: /desktop\.spec\.ts/ },
   ],
 });

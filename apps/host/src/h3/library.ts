@@ -8,7 +8,8 @@ import { join } from 'node:path';
 
 export interface VideoRecord {
   id: string;
-  model: 'MiniMax H3';
+  /** 'HyperFrames' = 代码渲染(没有用 AI 模型),其余字段里 seed 为 0、显存/内存峰值为 null */
+  model: 'MiniMax H3' | 'HyperFrames';
   prompt: string;
   frames: number;
   seconds: number;
@@ -27,6 +28,18 @@ export interface VideoRecord {
   file: string;
   /** 剪辑产物才有:由哪几条(按顺序)经什么操作得到;prompt/seed 沿用第一条来源 */
   editedFrom?: { op: 'trim' | 'concat' | 'subtitle'; sources: string[]; detail: string };
+  /** 代码渲染产物才有:交付前自检生成的联系表 PNG(绝对路径,和 MP4 放在同一目录) */
+  contactSheet?: string;
+  /** 代码渲染产物才有:风格包与分镜 */
+  motion?: { style: string; title: string; subtitle: string | null; shots: Array<{ label: string; start: number; end: number }> };
+}
+
+/** 给页面和 agent 看的记录:去掉本机绝对路径 */
+export type PublicVideo = Omit<VideoRecord, 'file' | 'contactSheet'>;
+
+export function publicVideo(rec: VideoRecord): PublicVideo {
+  const { file: _f, contactSheet: _c, ...pub } = rec;
+  return pub;
 }
 
 export class VideoLibrary {
@@ -50,6 +63,10 @@ export class VideoLibrary {
 
   fileFor(id: string): string {
     return join(this.dir, `${id}.mp4`);
+  }
+
+  contactSheetFor(id: string): string {
+    return join(this.dir, `${id}.contact.png`);
   }
 
   async add(record: VideoRecord): Promise<void> {

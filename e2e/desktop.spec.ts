@@ -177,7 +177,7 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
       process: typeof (globalThis as { process?: unknown }).process,
       bridge: Object.keys((window as unknown as { vidroom: object }).vidroom).sort(),
     }));
-    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openAbuseReport', 'openComfyUI', 'setKey'] });
+    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openAbuseReport', 'openComfyUI', 'setKey', 'setProvider'] });
     const prefs = await first.app.evaluate(({ BrowserWindow }) => {
       const p = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
       return { sandbox: p?.sandbox, contextIsolation: p?.contextIsolation, nodeIntegration: p?.nodeIntegration };

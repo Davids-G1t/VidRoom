@@ -108,7 +108,8 @@ export type JobState =
 
 export interface VideoRecord {
   id: string;
-  model: 'MiniMax H3';
+  /** HyperFrames = 代码渲染(不是 AI 生成) */
+  model: 'MiniMax H3' | 'HyperFrames';
   prompt: string;
   frames: number;
   seconds: number;
@@ -118,6 +119,7 @@ export interface VideoRecord {
   peakVramMiB: number | null;
   peakRamMiB: number | null;
   metricsSimulated: boolean;
+  motion?: { style: string; title: string; subtitle: string | null; shots: Array<{ label: string; start: number; end: number }> };
 }
 
 async function getJson<T>(path: string, init?: RequestInit): Promise<T | null> {

@@ -10,14 +10,16 @@ export interface RunningHost {
   stop: () => Promise<void>;
 }
 
-/** 起一个真实的 Host 进程,从控制台读出启动地址 */
-export async function startHostProcess(env: NodeJS.ProcessEnv): Promise<RunningHost> {
-  // 用 `node --import tsx` 单进程跑,kill 时不会在 Windows 上留下孤儿子进程
-  const child: ChildProcess = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
-    cwd: hostDir,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+/**
+ * 起一个真实的 Host 进程,从控制台读出启动地址。
+ * 默认 `node --import tsx src/main.ts`;给了 electron 就按桌面版的跑法:ELECTRON_RUN_AS_NODE=1 的 Electron
+ * 跑打包好的 host.mjs(没有 IPC 通道,所以走命令行模式读 key 文件、打印启动地址)。
+ */
+export async function startHostProcess(env: NodeJS.ProcessEnv, electron?: { exe: string; script: string }): Promise<RunningHost> {
+  // 用单进程跑,kill 时不会在 Windows 上留下孤儿子进程
+  const child: ChildProcess = electron
+    ? spawn(electron.exe, [electron.script], { cwd: hostDir, env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    : spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], { cwd: hostDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout!.on('data', (d) => (out += d));
   child.stderr!.on('data', (d) => (out += d));

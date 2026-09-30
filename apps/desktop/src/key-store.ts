@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isLlmProvider, type LlmProvider } from '../../host/src/llm-provider.js';
 
 /**
- * DeepSeek key 的加密落盘。这个文件不 import electron,加解密函数由 main.ts 传入
+ * LLM API key(DeepSeek / Anthropic 各一份文件)的加密落盘,以及「当前用哪家」的选择。这个文件不 import electron,加解密函数由 main.ts 传入
  * (生产用 Electron safeStorage:Windows 上走 DPAPI),方便单测。
  *
  * 明文 key 只在主进程内存里短暂存在:解密后经 IPC 通道交给 Host 子进程。
@@ -10,6 +11,24 @@ import { join } from 'node:path';
  */
 
 export const KEY_FILE_NAME = 'deepseek-key.enc';
+export const KEY_FILE_NAMES: Record<LlmProvider, string> = { deepseek: KEY_FILE_NAME, anthropic: 'anthropic-key.enc' };
+/** 当前选用哪家(不是秘密,明文 JSON) */
+export const PROVIDER_FILE_NAME = 'llm-provider.json';
+
+export function loadProvider(dir: string): LlmProvider {
+  try {
+    const p = (JSON.parse(readFileSync(join(dir, PROVIDER_FILE_NAME), 'utf8')) as { provider?: unknown }).provider;
+    return isLlmProvider(p) ? p : 'deepseek';
+  } catch {
+    return 'deepseek';
+  }
+}
+
+export function saveProvider(dir: string, provider: LlmProvider): void {
+  const file = join(dir, PROVIDER_FILE_NAME);
+  writeFileSync(`${file}.tmp`, JSON.stringify({ provider }));
+  renameSync(`${file}.tmp`, file);
+}
 
 export interface Cipher {
   encrypt(plain: string): Buffer;
@@ -34,8 +53,9 @@ export class KeyStore {
     dir: string,
     private readonly cipher: Cipher,
     private readonly log: (msg: string) => void = console.warn,
+    readonly provider: LlmProvider = 'deepseek',
   ) {
-    this.file = join(dir, KEY_FILE_NAME);
+    this.file = join(dir, KEY_FILE_NAMES[provider]);
   }
 
   has(): boolean {
@@ -49,7 +69,7 @@ export class KeyStore {
       const key = this.cipher.decrypt(readFileSync(this.file));
       return normalizeKeyInput(key);
     } catch {
-      this.log(`[vidroom-desktop] ${KEY_FILE_NAME} 解密失败(换了系统账户或文件损坏),当作没有配置 key`);
+      this.log(`[vidroom-desktop] ${KEY_FILE_NAMES[this.provider]} 解密失败(换了系统账户或文件损坏),当作没有配置 key`);
       return null;
     }
   }

@@ -52,7 +52,8 @@ describe('聊天页', () => {
       hasKey = true;
       return { ok: true as const };
     });
-    vi.stubGlobal('vidroom', { getKeyStatus: async () => ({ configured: false }), setKey });
+    const getKeyStatus = async () => ({ configured: hasKey, provider: 'deepseek' as const, providers: { deepseek: hasKey, anthropic: false } });
+    vi.stubGlobal('vidroom', { getKeyStatus, setKey, setProvider: vi.fn() });
 
     render(<App />);
     fireEvent.click(within(await screen.findByTestId('no-key-notice')).getByRole('link', { name: '去设置' }));
@@ -62,11 +63,33 @@ describe('聊天页', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
 
     expect(await screen.findByTestId('settings-message')).toHaveTextContent('已保存');
-    expect(setKey).toHaveBeenCalledWith('  sk-fake-123  ');
+    expect(setKey).toHaveBeenCalledWith('  sk-fake-123  ', 'deepseek');
     expect(screen.getByTestId('key-status')).toHaveTextContent('已配置');
     expect(input).toHaveValue('');
     await waitFor(() => expect(screen.queryByTestId('no-key-notice')).toBeNull());
     expect(document.body.innerHTML).not.toContain('sk-fake-123');
+  });
+
+  it('桌面版设置页:切到 Anthropic 就调 setProvider,key 输入框和状态换成 Anthropic 的,存 key 带上 anthropic', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ hasApiKey: true }), { status: 200 })));
+    let provider: 'deepseek' | 'anthropic' = 'deepseek';
+    const setProvider = vi.fn(async (p: 'deepseek' | 'anthropic') => {
+      provider = p;
+      return { ok: true as const };
+    });
+    const setKey = vi.fn(async () => ({ ok: true as const }));
+    const getKeyStatus = async () => ({ configured: provider === 'deepseek', provider, providers: { deepseek: true, anthropic: false } });
+    vi.stubGlobal('vidroom', { getKeyStatus, setKey, setProvider });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    expect(await screen.findByTestId('key-status')).toHaveTextContent('DeepSeek API key:已配置');
+    fireEvent.click(screen.getByRole('radio', { name: /Anthropic/ }));
+    await waitFor(() => expect(screen.getByTestId('key-status')).toHaveTextContent('Anthropic API key:未配置'));
+    expect(setProvider).toHaveBeenCalledWith('anthropic');
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'sk-ant-fake' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(setKey).toHaveBeenCalledWith('sk-ant-fake', 'anthropic'));
   });
 
   it('浏览器里打开(没有桌面接口):设置页说明只在桌面版可用', async () => {

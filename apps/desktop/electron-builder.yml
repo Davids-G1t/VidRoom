@@ -16,6 +16,12 @@ extraResources:
     to: host
   - from: ../web/dist
     to: web
+  # 代码渲染用的 HyperFrames CLI(Apache-2.0)连同它的 node_modules;先跑 `pnpm hyperframes:install`(npm ci,按锁文件)
+  - from: ../host/hyperframes
+    to: hyperframes
+    filter:
+      - package.json
+      - node_modules/**/*
 npmRebuild: false
 win:
   target:

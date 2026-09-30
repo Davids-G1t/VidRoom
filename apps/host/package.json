@@ -9,10 +9,13 @@
     "typecheck": "tsc --noEmit",
     "comfyui:smoke": "node --import tsx scripts/comfyui-smoke.ts",
     "h3:models": "node --import tsx scripts/h3-models.ts",
-    "ffmpeg:fetch": "node --import tsx scripts/ffmpeg-fetch.ts"
+    "ffmpeg:fetch": "node --import tsx scripts/ffmpeg-fetch.ts",
+    "motion:render": "node --import tsx scripts/motion-render.ts",
+    "motion:verify": "node --import tsx scripts/motion-verify.ts"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",
+    "@ai-sdk/anthropic": "^4.0.70",
     "@ai-sdk/deepseek": "^3.0.57",
     "ai": "^7.0.123",
     "zod": "^4.6.5"

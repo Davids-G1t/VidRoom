@@ -15,6 +15,8 @@ import { startFakeLlm, type FakeLlm } from './fake-llm';
  */
 
 const desktopDir = fileURLToPath(new URL('../apps/desktop/', import.meta.url));
+// 假 ComfyUI(只用 Python 标准库):验证「启动 / 打开 ComfyUI」和退出后不残留,不需要真 ComfyUI 和显卡
+const fakeComfyDir = fileURLToPath(new URL('../apps/host/test/fixtures/fake-comfyui', import.meta.url));
 const FAKE_KEY = 'fake-deepseek-key-for-e2e-0123456789';
 const shots = (name: string) => `test-results/desktop-${name}.png`;
 
@@ -35,6 +37,8 @@ async function launch(userDataDir: string, fake: FakeLlm): Promise<Launched> {
   delete env.ELECTRON_RUN_AS_NODE;
   env.VIDROOM_USER_DATA_DIR = userDataDir;
   env.VIDROOM_DEEPSEEK_BASE_URL = fake.baseURL;
+  env.VIDROOM_COMFYUI_DIR = fakeComfyDir;
+  env.VIDROOM_COMFYUI_PYTHON = process.env.VIDROOM_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
 
   const exe = process.env.VIDROOM_DESKTOP_EXE;
   const app = exe
@@ -49,7 +53,7 @@ async function launch(userDataDir: string, fake: FakeLlm): Promise<Launched> {
   const page = await app.firstWindow();
   const hostPid = async () => {
     let pid: number | null = null;
-    await expect.poll(() => (pid = findHostPid(app.process().pid!)), { timeout: 30_000 }).not.toBeNull();
+    await expect.poll(() => (pid = findDescendantPid(app.process().pid!, 'host.mjs')), { timeout: 30_000 }).not.toBeNull();
     return pid!;
   };
   return { app, page, hostPid, exited };
@@ -86,10 +90,10 @@ function processTable(): ProcRow[] {
 }
 
 /**
- * 从操作系统里找 Host:Playwright 起的进程的后代里,命令行带 host.mjs 的那个。
+ * 从操作系统里找 Playwright 起的进程的后代里、命令行含 needle 的那一个(如 Host 的 host.mjs)。
  * (Windows 上 Playwright 起的进程和 Electron 主进程之间还隔着一层,Host 是它的孙子进程。)
  */
-function findHostPid(rootPid: number): number | null {
+function findDescendantPid(rootPid: number, needle: string): number | null {
   const rows = processTable();
   const descendants = new Set([rootPid]);
   for (let grew = true; grew; ) {
@@ -101,8 +105,8 @@ function findHostPid(rootPid: number): number | null {
       }
     }
   }
-  const hosts = rows.filter((r) => r.pid !== rootPid && descendants.has(r.pid) && r.cmd.includes('host.mjs'));
-  return hosts.length === 1 ? hosts[0].pid : null;
+  const hits = rows.filter((r) => r.pid !== rootPid && descendants.has(r.pid) && r.cmd.includes(needle));
+  return hits.length === 1 ? hits[0].pid : null;
 }
 
 function isAlive(pid: number): boolean {
@@ -172,7 +176,7 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
       process: typeof (globalThis as { process?: unknown }).process,
       bridge: Object.keys((window as unknown as { vidroom: object }).vidroom).sort(),
     }));
-    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'setKey'] });
+    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openComfyUI', 'setKey'] });
     const prefs = await first.app.evaluate(({ BrowserWindow }) => {
       const p = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
       return { sandbox: p?.sandbox, contextIsolation: p?.contextIsolation, nodeIntegration: p?.nodeIntegration };
@@ -300,6 +304,49 @@ test('没有任务在跑时关窗:不问,直接退出,Host 不残留', async () 
     await closeWindow(run.app);
     await run.exited;
     await expect.poll(() => isAlive(hostPid), { timeout: 15_000 }).toBe(false);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('「打开 ComfyUI」在系统浏览器里打开 http://127.0.0.1:<端口>/;退出应用后 30 秒内 ComfyUI 不残留', async () => {
+  const fake = await startFakeLlm();
+  try {
+    const run = await launch(mkdtempSync(join(tmpdir(), 'vidroom-desktop-e2e-')), fake);
+    const { page, app } = run;
+    const hostPid = await run.hostPid();
+
+    // shell.openExternal 会真去开系统浏览器:换成只记下地址
+    await app.evaluate(({ shell }) => {
+      const g = globalThis as unknown as { __opened: string[] };
+      g.__opened = [];
+      shell.openExternal = (async (url: string) => {
+        g.__opened.push(url);
+      }) as typeof shell.openExternal;
+    });
+
+    const panel = page.getByTestId('comfyui-panel');
+    await expect(panel.getByTestId('comfyui-status')).toHaveText('未启动');
+    await panel.getByRole('button', { name: '启动 ComfyUI' }).click();
+    await expect(panel.getByTestId('comfyui-status')).toContainText('运行中', { timeout: 60_000 });
+    const status = await page.evaluate(async () => (await fetch('/api/comfyui')).json());
+    expect(status).toMatchObject({ state: 'running', url: `http://127.0.0.1:${status.port}` });
+    const comfyPid = findDescendantPid(app.process().pid!, 'fake-comfyui');
+    expect(comfyPid).not.toBeNull();
+    await page.screenshot({ path: shots('5-comfyui-running') });
+
+    await panel.getByRole('button', { name: '打开 ComfyUI' }).click();
+    await expect
+      .poll(() => app.evaluate(() => (globalThis as unknown as { __opened: string[] }).__opened))
+      .toEqual([`http://127.0.0.1:${status.port}/`]);
+    console.log(`[comfyui] 打开的地址 http://127.0.0.1:${status.port}/,ComfyUI pid ${comfyPid}`);
+
+    await closeWindow(app);
+    await run.exited;
+    const t0 = Date.now();
+    await expect.poll(() => isAlive(comfyPid!), { timeout: 30_000 }).toBe(false);
+    await expect.poll(() => isAlive(hostPid), { timeout: 15_000 }).toBe(false);
+    console.log(`[comfyui] 应用退出后 ${Date.now() - t0} 毫秒内 ComfyUI(pid ${comfyPid})已不在`);
   } finally {
     await fake.close();
   }

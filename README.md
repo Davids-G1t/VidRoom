@@ -32,6 +32,8 @@ pnpm test                   # 三个包的单元测试
 pnpm test:e2e               # Playwright:不给 key 的页面行为(CI 也跑)
 pnpm test:e2e:gpu           # Playwright:真显卡 + 真 DeepSeek key,只在开发机跑
 pnpm test:e2e:desktop       # Playwright 驱动桌面版:假 key + 假 LLM 服务(CI 上驱动静默安装好的 exe)
+pnpm test:e2e:comfyui       # Playwright:「启动 / 打开 ComfyUI」,默认假 ComfyUI;设了 VIDROOM_COMFYUI_DIR 就用真的
+pnpm comfyui:smoke          # 真 ComfyUI 起停冒烟(参数见 apps/host/scripts/comfyui-smoke.ts)
 pnpm dist:win               # 打 Windows 安装包 VidRoom-Setup-<版本>.exe(CI 在 windows-latest 上打)
 ```
 
@@ -39,6 +41,13 @@ pnpm dist:win               # 打 Windows 安装包 VidRoom-Setup-<版本>.exe(C
 - 鉴权:Host 启动时打印 `http://127.0.0.1:<端口>/launch?token=<一次性 token>`;打开后换成 HttpOnly 的 session cookie,token 立即作废。所有 `/api/*` 都要这个 cookie,否则 401。
 - 显卡探测:agent 工具 `probe_gpu` 跑 `nvidia-smi`,按显存分档 —— 没有 NVIDIA 显卡 `none`;< 15 GiB `unsupported`;15–24 GiB `experimental`(MiniMax H3 可用、默认关);≥ 24 GiB `default`。显存按整 GiB 四舍五入后比较(标称 24GB 的卡实报常略少于 24576 MiB)。
 - 端口默认随机,可用 `VIDROOM_PORT` 固定。
+
+ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下载/起):
+- **Windows**:首次使用时下载官方 NVIDIA 便携包 `ComfyUI_windows_portable_nvidia.7z`(v0.38.0;版本、大小、sha256 写死在 `manifest.ts`,运行时不向远端要清单),断点续传(HTTP Range),sha256 对不上删掉重下,用随包的 7za 解压到 `%LOCALAPPDATA%\VidRoom\runtime\`。换镜像:环境变量 `VIDROOM_COMFYUI_DOWNLOAD_URL` 给完整下载地址,校验照旧按清单。
+- **Linux**:不下载。环境变量 `VIDROOM_COMFYUI_DIR` 指向已装好的 ComfyUI(有 `main.py` 的目录),python 默认用目录下的 `venv/`、`.venv/`,或用 `VIDROOM_COMFYUI_PYTHON` 指定。
+- 其它环境变量:`VIDROOM_COMFYUI_ARGS`(给 ComfyUI 加参数,如 `--cpu`)、`VIDROOM_DATA_DIR`(数据目录)。
+- Host 把 ComfyUI 当子进程起停:`--listen 127.0.0.1`、端口每次取一个空闲的、`--disable-auto-launch`;轮询 `/system_stats` 到就绪;检查 ComfyUI ≥ 0.30.0、PyTorch CUDA ≥ 13.0。「打开 ComfyUI」在系统默认浏览器里开 `http://127.0.0.1:<端口>/`。
+- 停止:ComfyUI 没有关闭服务的 HTTP 接口,它的正常退出路径是 Ctrl+C。Linux 上给进程组发 SIGINT,10 秒不退再 SIGKILL;Windows 上没有信号可发(Node 的 `kill()` 就是强杀),改为关 stdin 让 ComfyUI 进程里的引导代码模拟 Ctrl+C,10 秒不退再 `taskkill /T /F`。Host 无论怎么退出(包括被强杀),ComfyUI 发现 stdin 断了都会自己退出,不留孤儿进程。
 
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。

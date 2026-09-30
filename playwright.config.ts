@@ -13,5 +13,7 @@ export default defineConfig({
     { name: 'gpu', testMatch: /gpu-chat\.spec\.ts/ },
     // Playwright 驱动 Electron 桌面版;CI 上驱动静默安装好的 exe(VIDROOM_DESKTOP_EXE)
     { name: 'desktop', testMatch: /desktop\.spec\.ts/ },
+    // 「启动 / 打开 ComfyUI」:默认假 ComfyUI(要 Python),本机和 CI 都跑;设了 VIDROOM_COMFYUI_DIR 就用真的
+    { name: 'comfyui', testMatch: /comfyui\.spec\.ts/ },
   ],
 });

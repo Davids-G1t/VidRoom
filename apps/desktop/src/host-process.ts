@@ -40,6 +40,8 @@ export interface HostProcessOptions {
   script: string;
   /** 聊天页构建产物目录,给 Host 的静态服务用 */
   webDir: string;
+  /** 额外给 Host 的环境变量 */
+  env?: Record<string, string>;
   log?: (msg: string) => void;
 }
 
@@ -58,7 +60,12 @@ export class HostProcess {
   /** 起 Host 并交给它 key;等它监听好、主进程换到 cookie 才返回 */
   async start(apiKey: string | null): Promise<void> {
     const log = this.opts.log ?? console.log;
-    const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIDROOM_WEB_DIR: this.opts.webDir };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...this.opts.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      VIDROOM_WEB_DIR: this.opts.webDir,
+    };
     // Host 在 IPC 模式下本来就不读 key 文件;这里也不把开发用的 key 文件路径传下去
     delete env.VIDROOM_DEEPSEEK_KEY_FILE;
     const safeBaseURL = sanitizeDeepSeekBaseURL(env.VIDROOM_DEEPSEEK_BASE_URL);

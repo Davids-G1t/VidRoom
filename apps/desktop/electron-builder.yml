@@ -21,6 +21,10 @@ win:
   target:
     - target: nsis
       arch: [x64]
+  # Host 首次使用时解压 ComfyUI 官方便携包(.7z)用;来自 npm 包 7zip-bin(7-Zip 的 7za,LGPL,未改动)
+  extraResources:
+    - from: ../host/node_modules/7zip-bin/win/x64/7za.exe
+      to: bin/7za.exe
 nsis:
   # 让用户自己选安装选项(不是一键装);默认按当前用户装进 %LOCALAPPDATA%\Programs,只写 HKCU
   oneClick: false

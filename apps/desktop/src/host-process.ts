@@ -13,15 +13,23 @@ import type { HostToParent, SetKeyMessage } from '../../host/src/parent-ipc.js';
 const SESSION_COOKIE_RE = /(?:^|[;,]\s*)(vidroom_session=[0-9a-f]+)/;
 
 /**
- * `VIDROOM_DEEPSEEK_BASE_URL` 只在 e2e 测试里用来把 LLM 请求指向本机假服务。
- * 打包后的应用继承的是用户级环境变量(Windows 上改 HKCU\Environment 不需要管理员),
- * 不收紧的话,攻击者只要设一个这个变量,就能让带着已解密 key 的请求悄悄发到任意地址。
- * 只放行指向回环地址的值,其余一律当作没设置(返回 undefined)。
+ * `VIDROOM_DEEPSEEK_BASE_URL` 只在 e2e 测试里用来把 LLM 请求指向本机假服务(测试直接
+ * 对打包产物设这个环境变量后启动,所以不能在"打包版"这个层面整个禁掉,否则测试基础设施
+ * 也跟着断)。打包后的应用继承的是用户级环境变量(Windows 上改 HKCU\Environment 不需要
+ * 管理员),不收紧的话,这个变量能把带着已解密 key 的请求指到任意地址。
+ *
+ * 这条只放行指向回环地址的值,是纵深防御的一层,**不是能排除同用户攻击者的硬边界**——
+ * 已经有本机同用户写环境变量能力的攻击者,一样能自己在回环地址起一个监听拦下请求,
+ * 或者直接用 NODE_OPTIONS 之类的其它环境变量拿到更大的能力面(Host 现在继承整个
+ * process.env,不止这一个变量)。真要堵住"同用户攻击者"这一档,需要把 Host 的环境变量
+ * 收成白名单、打包时关掉 --inspect / RunAsNode 这些 fuse——这些留作后续,这条只先挡住
+ * "误配置"和"影响不到同一用户环境变量的外部攻击者"这两类,其余一律当作没设置。
  */
 export function sanitizeDeepSeekBaseURL(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
-    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(new URL(value).hostname) ? value : undefined;
+    // new URL(...).hostname 对 IPv6 字面量返回带方括号的形式(如 "[::1]"),裸 "::1" 永远不会出现,不放行它。
+    return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(value).hostname) ? value : undefined;
   } catch {
     return undefined;
   }

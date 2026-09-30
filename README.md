@@ -13,7 +13,7 @@ VidRoom **不自己写生成引擎**。真正的视频/图像生成全部跑在 
 
 ## 许可
 
-主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。剪辑用的 ffmpeg 是首次使用时从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载的 **LGPL** 构建(不带 GPL 的 libx264,H.264 编码用 BSD 许可的 OpenH264),作为独立可执行文件调用,不链接进主程序。
+主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。剪辑用的 ffmpeg 是首次使用时从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载的 **LGPL** 构建(不带 GPL 的 libx264,H.264 编码用 BSD 许可的 OpenH264),作为独立可执行文件调用,不链接进主程序。**注意**:思科(Cisco)对 OpenH264 的专利授权只覆盖思科自己分发的二进制([openh264.org FAQ](https://www.openh264.org/faq.html)),这份构建是从源码编译的,不带这项专利授权——这不影响它"不是 GPL"的结论,但涉及 H.264 专利的商业使用要自行评估。
 
 ## 状态
 

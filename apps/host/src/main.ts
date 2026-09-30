@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { createDeepSeekModel } from './agent.js';
 import { dataDir } from './comfyui/install.js';
 import { ComfyManager, defaultMemoryLimitMiB, parseExtraArgs } from './comfyui/manager.js';
+import { VideoEditor } from './ffmpeg/editor.js';
+import { ensureFfmpeg } from './ffmpeg/install.js';
 import { probeGpu } from './gpu.js';
 import { ConsentStore } from './h3/license.js';
 import { VideoLibrary } from './h3/library.js';
@@ -27,12 +29,20 @@ const comfy = new ComfyManager({
   extraArgs: ['--extra-model-paths-config', extraModelPaths, ...parseExtraArgs(process.env.VIDROOM_COMFYUI_ARGS)],
   memoryLimitMiB: defaultMemoryLimitMiB(totalmem()),
 });
+const library = new VideoLibrary(join(data, 'library'));
 const video = new VideoService({
   comfy,
   models: new ModelStore(models, join(data, 'cache', 'model-sha256.json'), h3ModelFiles()),
   consent: new ConsentStore(join(data, 'h3-consent.json')),
-  library: new VideoLibrary(join(data, 'library')),
+  library,
   probeGpu: () => probeGpu(),
+});
+// ffmpeg 第一次剪辑时才按清单下载(LGPL 构建);临时文件放数据目录,不用系统临时目录
+const editor = new VideoEditor({
+  library,
+  ffmpeg: () => ensureFfmpeg({ root: data, log: (m) => console.log(m) }),
+  workDir: join(data, 'cache', 'edit'),
+  log: (m) => console.log(m),
 });
 
 const modelFor = (apiKey: string | null) => (apiKey ? createDeepSeekModel(apiKey, baseURL) : null);
@@ -56,7 +66,7 @@ if (process.send) {
     const secrets = msg.apiKey ? [msg.apiKey] : [];
     if (host === null) {
       // 第一条 set-key 到了才起服务,页面第一次查状态时 key 已就位
-      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets, comfy, video });
+      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets, comfy, video, editor });
       send({ type: 'ready', launchUrl: host.launchUrl });
     } else {
       host.setModel(modelFor(msg.apiKey), secrets);
@@ -84,7 +94,7 @@ if (process.send) {
   process.on('SIGINT', shutdown);
 } else {
   const apiKey = loadDeepSeekKey();
-  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video });
+  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video, editor });
 
   if (!apiKey) {
     console.log(`[vidroom] 没有配置 DeepSeek API key(环境变量 ${KEY_FILE_ENV} 未设置或文件不存在),聊天功能不可用。`);

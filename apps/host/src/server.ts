@@ -7,6 +7,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import type { LanguageModel } from 'ai';
 import { LaunchAuth, SESSION_COOKIE, parseCookies, sessionCookieHeader } from './auth.js';
 import { runChat, type ChatMessage } from './agent.js';
+import type { VideoEditor } from './ffmpeg/editor.js';
 import type { RunNvidiaSmi } from './gpu.js';
 import type { ComfyManager } from './comfyui/manager.js';
 import type { VideoService } from './h3/service.js';
@@ -29,6 +30,8 @@ export interface HostOptions {
   comfy?: ComfyManager;
   /** 出片服务;不给就没有 generate_video 工具和 /api/h3、/api/videos 接口 */
   video?: VideoService;
+  /** 剪辑服务;不给就没有剪辑工具 */
+  editor?: VideoEditor;
 }
 
 export interface Host {
@@ -144,7 +147,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
         return;
       }
       try {
-        const reply = await runChat(model, messages, { runNvidiaSmi: opts.runNvidiaSmi, video: opts.video });
+        const reply = await runChat(model, messages, { runNvidiaSmi: opts.runNvidiaSmi, video: opts.video, editor: opts.editor });
         sendJson(res, 200, reply);
       } catch (err) {
         console.error('[vidroom] 调用 LLM 失败:', redact(err instanceof Error ? err.message : String(err), secrets));

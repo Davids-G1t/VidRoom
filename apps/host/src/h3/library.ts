@@ -25,6 +25,8 @@ export interface VideoRecord {
   metricsSimulated: boolean;
   /** MP4 的绝对路径 */
   file: string;
+  /** 剪辑产物才有:由哪几条(按顺序)经什么操作得到;prompt/seed 沿用第一条来源 */
+  editedFrom?: { op: 'trim' | 'concat' | 'subtitle'; sources: string[]; detail: string };
 }
 
 export class VideoLibrary {

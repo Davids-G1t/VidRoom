@@ -13,7 +13,7 @@ VidRoom **不自己写生成引擎**。真正的视频/图像生成全部跑在 
 
 ## 许可
 
-主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。
+主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。剪辑用的 ffmpeg 是首次使用时从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载的 **LGPL** 构建(不带 GPL 的 libx264,H.264 编码用 BSD 许可的 OpenH264),作为独立可执行文件调用,不链接进主程序。**注意**:思科(Cisco)对 OpenH264 的专利授权只覆盖思科自己分发的二进制([openh264.org FAQ](https://www.openh264.org/faq.html)),这份构建是从源码编译的,不带这项专利授权——这不影响它"不是 GPL"的结论,但涉及 H.264 专利的商业使用要自行评估。
 
 ## 状态
 
@@ -57,6 +57,12 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - 许可义务:成片卡片、详情页、「关于」页标「MiniMax H3」,「关于」页附 NOTICE 原文;使用限制原样转达见 [docs/USE-POLICY.md](docs/USE-POLICY.md);滥用举报流程见 [docs/abuse.md](docs/abuse.md)(菜单「举报滥用」打开 issue 模板)。防滥用靠聊天 LLM 按系统提示词判断意图,不做关键词过滤。仓库里不放任何成片或截帧。
 - 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,不碰真实权重、不需要真显卡,测试自己起本机假镜像)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
 - 已知问题:权重下载走 Node 的 `fetch`,默认不读系统代理环境变量;连不上 Hugging Face 时(常见于国内网络)要设 `NODE_USE_ENV_PROXY=1` 才会走代理,应用目前不会自动提示这一点,用户会看到下载失败但不知道原因——留给后续批次处理(比如下载失败时给出更明确的排障提示)。
+
+剪辑(`apps/host/src/ffmpeg/`):
+- agent 工具 `list_videos`、`trim_video`、`concat_videos`、`add_subtitle`,只按作品库 id 操作,结果作为新的一条入库(记 `editedFrom`),原片不动;容器元数据(含 `AI-generated with MiniMax H3`)从第一个输入带过来。
+- ffmpeg:Windows / Linux 都在第一次剪辑时按 `manifest.ts` 下载锁定的 LGPL 构建(版本、大小、sha256 写死,断点续传,解压到 `<数据目录>/runtime/`),**不用系统自带的 ffmpeg**;装好后查 `ffmpeg -version` 的 configuration 行,带 `--enable-gpl` 就拒用。换镜像 `VIDROOM_FFMPEG_DOWNLOAD_URL`;命令行预下载 `pnpm ffmpeg:fetch`。
+- 剪切:起点在关键帧上就 `-c copy` 流复制;不在就用 libopenh264 重新编码,剪得准但慢。拼接:各段编码参数一致用 concat demuxer 流复制,不一致用 concat 滤镜统一成第一段的尺寸/帧率后重新编码(没声音的段补静音)。加字幕:`drawtext` 烧进画面,libopenh264 重新编码;字体按平台找带中文字形的系统字体(Windows 微软雅黑/黑体/宋体,Linux Noto CJK/文泉驿),`VIDROOM_SUBTITLE_FONT` 可指定。
+- 测试素材由 ffmpeg 的 `color`/`testsrc`/`sine` 现做(几百 KB),放 `apps/host/.test-tmp/`(`VIDROOM_TEST_TMP` 可改),不用系统临时目录。
 
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。

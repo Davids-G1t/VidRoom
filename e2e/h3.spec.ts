@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -8,20 +9,19 @@ import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { CAT_PROMPT } from '../apps/host/test/fixtures/h3-prompts';
 import { H3_LICENSE, H3_NOTICE } from '../apps/host/src/h3/license';
-import { H3_MODEL_FILES } from '../apps/host/src/h3/models';
+import { H3_MODEL_FILES, type ModelFile } from '../apps/host/src/h3/models';
 import { buildH3Prompt } from '../apps/host/src/h3/workflow';
 import { startFakeLlm } from './fake-llm';
 import { startHostProcess } from './host';
 
 /**
- * 开发机专用:MiniMax H3 出片全链路,**假 ComfyUI 回放**(不加载模型、不占显卡)+ 假 LLM + 本机假「HF 镜像」。
+ * 开发机专用:MiniMax H3 出片全链路,**全部用假的**:假 ComfyUI 回放(不加载模型、不占显卡)、假 LLM、
+ * 几 KB 的假「权重」+ 本机假「HF 镜像」。**不下载、不读取任何真实权重。**
+ * Host 用 VIDROOM_H3_TEST_MANIFEST 换成假清单(文件名与真实的相同,大小与 sha256 是假文件自己的),
+ * 三个文件预先放进模型目录(应被识别为「已有,跳过」),视频 VAE 只在假镜像上(模拟「从 HF 下载缺的那个」)。
  *
- * 前提(不满足直接失败,不跳过):
- * - VIDROOM_E2E_H3_MODELS_DIR 指向一个已有四个 H3 权重(完整、sha256 对得上)的目录:
- *   测试把其中扩散主干、文本编码器、音频 VAE 三个文件软链进临时模型目录(应被识别为「已有,跳过」),
- *   视频 VAE 由假镜像从这个目录读出来发给 Host(模拟「从 HF 下载缺的那个文件」,记录每一个下载请求)。
- * - 本机显卡在 experimental 或 default 档(experimental 档由测试设 VIDROOM_H3_EXPERIMENTAL=1 打开)。
- * - PATH 上有 Python、ffmpeg、ffprobe。
+ * 前提(不满足直接失败,不跳过):本机显卡在 experimental 或 default 档(experimental 由测试设 VIDROOM_H3_EXPERIMENTAL=1 打开);
+ * PATH 上有 Python、ffmpeg、ffprobe。
  *
  * 覆盖验收:① 端到端(假回放)、⑤ 成片卡片/详情/「关于」页标名与 NOTICE、⑥ 许可页与下载、⑧「举报滥用」入口。
  */
@@ -36,16 +36,14 @@ interface Mirror {
   close: () => Promise<void>;
 }
 
-/** 假 HF:按 /<folder>/<fileName> 从真实模型目录读文件发出去,记下每个请求 */
-async function startMirror(sourceDir: string): Promise<Mirror> {
+/** 假 HF:按 /<folder>/<fileName> 发内存里的假文件,记下每个请求 */
+async function startMirror(files: Map<string, Buffer>): Promise<Mirror> {
   const requests: string[] = [];
   const server: Server = createServer((req, res) => {
     requests.push(req.url ?? '');
-    const f = H3_MODEL_FILES.find((m) => req.url === `/${m.folder}/${m.fileName}`);
-    const path = f && join(sourceDir, f.folder, f.fileName);
-    if (!path || !existsSync(path)) return void res.writeHead(404).end();
-    res.writeHead(200, { 'content-length': statSync(path).size });
-    createReadStream(path).pipe(res);
+    const data = files.get(req.url ?? '');
+    if (!data) return void res.writeHead(404).end();
+    res.writeHead(200, { 'content-length': data.length }).end(data);
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   return {
@@ -55,33 +53,39 @@ async function startMirror(sourceDir: string): Promise<Mirror> {
   };
 }
 
-test('出片:许可页 → 只下缺的视频 VAE → 聊一句出片(假回放)→ 作品库与「关于」标名 → 举报滥用', async ({ page }) => {
-  test.setTimeout(2_400_000); // 核对 37 GB 权重 + 本机传 2.8 GB,机器忙时要很久
-  const source = process.env.VIDROOM_E2E_H3_MODELS_DIR;
-  expect(source, '需要设置 VIDROOM_E2E_H3_MODELS_DIR(已有完整 H3 权重的目录)').toBeTruthy();
-  for (const f of H3_MODEL_FILES) {
-    const p = join(source!, f.folder, f.fileName);
-    expect(existsSync(p) && statSync(p).size === f.size, `${p} 不存在或大小不对`).toBe(true);
-  }
+/** 和真实清单同名的四个假「权重」(几十 KB 随机数据) */
+function fakeWeights(): Array<{ file: ModelFile; data: Buffer }> {
+  return H3_MODEL_FILES.map((f, i) => {
+    const data = randomBytes(32 * 1024 + i * 1000);
+    return { file: { ...f, size: data.length, sha256: createHash('sha256').update(data).digest('hex') }, data };
+  });
+}
 
+test('出片:许可页 → 只下缺的视频 VAE → 聊一句出片(假回放)→ 作品库与「关于」标名 → 举报滥用', async ({ page }) => {
+  test.setTimeout(600_000);
   const root = mkdtempSync(join(tmpdir(), 'vidroom-e2e-h3-'));
   const dataDir = join(root, 'data');
   const modelsDir = join(root, 'models');
-  for (const f of H3_MODEL_FILES.filter((m) => m !== VIDEO_VAE)) {
-    mkdirSync(join(modelsDir, f.folder), { recursive: true });
-    symlinkSync(join(source!, f.folder, f.fileName), join(modelsDir, f.folder, f.fileName));
+  const weights = fakeWeights();
+  const manifest = join(root, 'fake-manifest.json');
+  writeFileSync(manifest, JSON.stringify(weights.map((w) => w.file)));
+  const missing = weights.find((w) => w.file.role === '视频 VAE')!;
+  for (const w of weights.filter((x) => x !== missing)) {
+    mkdirSync(join(modelsDir, w.file.folder), { recursive: true });
+    writeFileSync(join(modelsDir, w.file.folder, w.file.fileName), w.data);
   }
   const requestLog = join(root, 'prompt-requests.jsonl');
   const keyFile = join(root, 'fake-key.txt');
   writeFileSync(keyFile, 'fake-deepseek-key-for-h3-e2e');
 
-  const mirror = await startMirror(source!);
+  const mirror = await startMirror(new Map([[`/${missing.file.folder}/${missing.file.fileName}`, missing.data]]));
   const fake = await startFakeLlm();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     VIDROOM_DATA_DIR: dataDir,
     VIDROOM_MODELS_DIR: modelsDir,
     VIDROOM_H3_DOWNLOAD_BASE: mirror.base,
+    VIDROOM_H3_TEST_MANIFEST: manifest,
     VIDROOM_H3_EXPERIMENTAL: '1',
     VIDROOM_COMFYUI_DIR: fakeComfyDir,
     VIDROOM_COMFYUI_PYTHON: process.env.VIDROOM_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3'),
@@ -143,7 +147,7 @@ test('出片:许可页 → 只下缺的视频 VAE → 聊一句出片(假回放)
     await dialog.getByRole('checkbox').check();
     const t0 = Date.now();
     await dialog.getByRole('button', { name: '同意并下载' }).click();
-    await expect(panel.getByTestId('h3-download')).toHaveText(`下载完成:vae/${VIDEO_VAE.fileName}`, { timeout: 1_500_000 });
+    await expect(panel.getByTestId('h3-download')).toHaveText(`下载完成:vae/${VIDEO_VAE.fileName}`, { timeout: 60_000 });
     console.log(`[h3] 核对 + 下载用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒,镜像收到的请求:${JSON.stringify(mirror.requests)}`);
     expect(mirror.requests).toEqual([`/vae/${VIDEO_VAE.fileName}`]);
     const consent = JSON.parse(readFileSync(consentFile, 'utf8'));
@@ -205,5 +209,6 @@ test('出片:许可页 → 只下缺的视频 VAE → 聊一句出片(假回放)
     await host.stop();
     await fake.close();
     await mirror.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });

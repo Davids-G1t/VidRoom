@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,6 +109,7 @@ describe('VideoService(假 ComfyUI 回放)', () => {
   });
   afterAll(async () => {
     await comfy.stop();
+    rmSync(root, { recursive: true, force: true });
     delete process.env.FAKE_COMFY_REQUEST_LOG;
     delete process.env.FAKE_COMFY_STEP_MS;
   });

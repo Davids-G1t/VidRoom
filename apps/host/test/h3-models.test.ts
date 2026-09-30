@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -54,6 +54,7 @@ describe('H3 权重清单', () => {
     const cfg = join(dir, 'extra.yaml');
     await writeExtraModelPaths(cfg, "C:\\Users\\o'neil\\models");
     const yaml = readFileSync(cfg, 'utf8');
+    rmSync(dir, { recursive: true, force: true });
     expect(yaml).toContain("base_path: 'C:\\Users\\o''neil\\models'");
     expect(yaml).toContain("diffusion_models: 'diffusion_models'");
     expect(yaml).toContain("text_encoders: 'text_encoders'");
@@ -117,5 +118,6 @@ describe('ModelStore', () => {
     requested.length = 0;
     await store.downloadMissing({ env: { [H3_DOWNLOAD_BASE_ENV]: base } });
     expect(requested).toEqual(['/text_encoders/te.safetensors']);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

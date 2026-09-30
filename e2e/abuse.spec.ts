@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +14,9 @@ import { startHostProcess } from './host';
  * 防滥用只靠聊天 LLM 按系统提示词自己判断意图 —— 没有关键词过滤,也没有第二个审查模型。
  * - 3 条明显违规的请求:LLM 都拒绝,断言 /prompt 一次都没被调用、没有 generate_video 调用;
  * - 3 条正常请求:都正常出片,成片 ffprobe 能读到「AI-generated with MiniMax H3」。
- * 前提(不满足直接失败):VIDROOM_DEEPSEEK_KEY_FILE、VIDROOM_E2E_H3_MODELS_DIR(已有完整 H3 权重的目录)、
- * 15 GiB 以上显存的 NVIDIA 显卡(experimental 档由测试打开)、Python、ffmpeg/ffprobe。
+ * 权重用几 KB 的假文件(VIDROOM_H3_TEST_MANIFEST),不碰真实权重。
+ * 前提(不满足直接失败):VIDROOM_DEEPSEEK_KEY_FILE、15 GiB 以上显存的 NVIDIA 显卡(experimental 档由测试打开)、
+ * Python、ffmpeg/ffprobe。
  */
 
 const fakeComfyDir = fileURLToPath(new URL('../apps/host/test/fixtures/fake-comfyui', import.meta.url));
@@ -47,18 +49,17 @@ test('真 DeepSeek:3 条明显违规请求都被拒、/prompt 没被调用;3 条
   const keyFile = process.env.VIDROOM_DEEPSEEK_KEY_FILE;
   expect(keyFile, '需要设置 VIDROOM_DEEPSEEK_KEY_FILE(真 DeepSeek key 文件)').toBeTruthy();
   expect(existsSync(keyFile!)).toBe(true);
-  const source = process.env.VIDROOM_E2E_H3_MODELS_DIR;
-  expect(source, '需要设置 VIDROOM_E2E_H3_MODELS_DIR').toBeTruthy();
 
   const root = mkdtempSync(join(tmpdir(), 'vidroom-e2e-abuse-'));
   const dataDir = join(root, 'data');
   const modelsDir = join(root, 'models');
-  for (const f of H3_MODEL_FILES) {
-    const p = join(source!, f.folder, f.fileName);
-    expect(existsSync(p) && statSync(p).size === f.size, `${p} 不存在或大小不对`).toBe(true);
+  const manifest = H3_MODEL_FILES.map((f) => {
+    const data = randomBytes(16 * 1024);
     mkdirSync(join(modelsDir, f.folder), { recursive: true });
-    symlinkSync(p, join(modelsDir, f.folder, f.fileName));
-  }
+    writeFileSync(join(modelsDir, f.folder, f.fileName), data);
+    return { ...f, size: data.length, sha256: createHash('sha256').update(data).digest('hex') };
+  });
+  writeFileSync(join(root, 'fake-manifest.json'), JSON.stringify(manifest));
   // 许可同意与下载已在 h3.spec.ts 里测过;这里直接放一条同意记录,专测防滥用
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(join(dataDir, 'h3-consent.json'), JSON.stringify({ licenseSha256: H3_LICENSE.sha256, acceptedAt: new Date().toISOString() }));
@@ -69,6 +70,7 @@ test('真 DeepSeek:3 条明显违规请求都被拒、/prompt 没被调用;3 条
     ...process.env,
     VIDROOM_DATA_DIR: dataDir,
     VIDROOM_MODELS_DIR: modelsDir,
+    VIDROOM_H3_TEST_MANIFEST: join(root, 'fake-manifest.json'),
     VIDROOM_H3_EXPERIMENTAL: '1',
     VIDROOM_COMFYUI_DIR: fakeComfyDir,
     VIDROOM_COMFYUI_PYTHON: process.env.VIDROOM_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3'),
@@ -107,5 +109,6 @@ test('真 DeepSeek:3 条明显违规请求都被拒、/prompt 没被调用;3 条
     }
   } finally {
     await host.stop();
+    rmSync(root, { recursive: true, force: true });
   }
 });

@@ -7,7 +7,7 @@ import { ComfyManager, defaultMemoryLimitMiB, parseExtraArgs } from './comfyui/m
 import { probeGpu } from './gpu.js';
 import { ConsentStore } from './h3/license.js';
 import { VideoLibrary } from './h3/library.js';
-import { ModelStore, modelsDir, writeExtraModelPaths } from './h3/models.js';
+import { ModelStore, h3ModelFiles, modelsDir, writeExtraModelPaths } from './h3/models.js';
 import { VideoService } from './h3/service.js';
 import { KEY_FILE_ENV, loadDeepSeekKey } from './key.js';
 import { parseParentMessage, type HostToParent } from './parent-ipc.js';
@@ -29,7 +29,7 @@ const comfy = new ComfyManager({
 });
 const video = new VideoService({
   comfy,
-  models: new ModelStore(models, join(data, 'cache', 'model-sha256.json')),
+  models: new ModelStore(models, join(data, 'cache', 'model-sha256.json'), h3ModelFiles()),
   consent: new ConsentStore(join(data, 'h3-consent.json')),
   library: new VideoLibrary(join(data, 'library')),
   probeGpu: () => probeGpu(),

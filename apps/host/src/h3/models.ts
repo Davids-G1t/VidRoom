@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { downloadVerified, sha256File } from '../comfyui/download.js';
@@ -54,6 +55,21 @@ export const H3_MODEL_FILES: readonly ModelFile[] = [
     role: '音频 VAE',
   },
 ];
+
+/**
+ * 仅测试用:指向一个 JSON 文件(ModelFile[]),用几 KB 的假「权重」替代上面的真实清单,
+ * 让端到端测试走完「核对 → 跳过已有 → 下载缺的」整条路径而不碰真实的几十 GB 文件。
+ * 能设这个环境变量的人本来就能改用户的一切文件,不构成新的攻击面;正常使用不要设。
+ */
+export const H3_TEST_MANIFEST_ENV = 'VIDROOM_H3_TEST_MANIFEST';
+
+export function h3ModelFiles(env: NodeJS.ProcessEnv = process.env): readonly ModelFile[] {
+  const p = env[H3_TEST_MANIFEST_ENV];
+  if (!p) return H3_MODEL_FILES;
+  const files = JSON.parse(readFileSync(p, 'utf8')) as ModelFile[];
+  if (!Array.isArray(files) || files.length === 0) throw new Error(`${H3_TEST_MANIFEST_ENV} 指向的清单为空`);
+  return files;
+}
 
 export const MODELS_DIR_ENV = 'VIDROOM_MODELS_DIR';
 /** 换镜像:给一个前缀,文件地址是 `<前缀>/<folder>/<fileName>`。下完照样按清单 sha256 校验。 */

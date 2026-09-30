@@ -185,6 +185,9 @@ jobs:
 
       # 一条脚本做完:下载(100 MiB 处主动中断再续传)、校验、解压、torch.version.cuda、--cpu 起停与监听地址、残留检查
       - name: Download portable, resume, verify, start with --cpu, stop
+        env:
+          # 起不来时每 120 秒把 ComfyUI 所有线程的调用栈打进日志,便于排查卡在哪
+          VIDROOM_COMFYUI_DUMP_STACKS_AFTER: '120'
         run: pnpm comfyui:smoke -- --interrupt-download-at 104857600 --cpu
 
       - name: No ComfyUI python process left (Get-Process)

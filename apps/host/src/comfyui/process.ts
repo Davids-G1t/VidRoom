@@ -33,11 +33,23 @@ export const WATCHDOG_EXIT_CODE = 86;
 
 const BOOTSTRAP = [
   'import os, signal, sys, threading, time, _thread',
-  'def _watch():',
-  '    try:',
+  'def _wait_stdin_closed():',
+  "    if os.name == 'nt':",
+  // Windows 上不能在线程里阻塞读 stdin:同步管道句柄上挂着一个 ReadFile 时,别的线程对同一句柄的操作
+  // (如查句柄类型)会一起卡住。改为每半秒 PeekNamedPipe 看一眼,管道断了它就返回失败。
+  '        import ctypes, msvcrt',
+  '        from ctypes import wintypes',
+  '        h = wintypes.HANDLE(msvcrt.get_osfhandle(0))',
+  '        n = wintypes.DWORD()',
+  '        while ctypes.windll.kernel32.PeekNamedPipe(h, None, 0, None, ctypes.byref(n), None):',
+  '            time.sleep(0.5)',
+  '    else:',
   // 读原始 fd,不读 sys.stdin:解释器正常退出时,守护线程卡在 BufferedReader 的锁上会让 Python 以 SIGABRT 崩掉
   '        while os.read(0, 65536):',
   '            pass',
+  'def _watch():',
+  '    try:',
+  '        _wait_stdin_closed()',
   '    except Exception:',
   '        pass',
   // 模拟 Ctrl+C。Linux 上 interrupt_main() 叫不醒 ComfyUI 阻塞在 select 里的事件循环(实测要等到 os._exit 兜底),
@@ -46,6 +58,10 @@ const BOOTSTRAP = [
   `    time.sleep(${STOP_GRACE_MS / 1000})`,
   `    os._exit(${WATCHDOG_EXIT_CODE})`,
   'threading.Thread(target=_watch, daemon=True).start()',
+  // 排障用:设了 VIDROOM_COMFYUI_DUMP_STACKS_AFTER=<秒>,到时还在跑就把所有线程的调用栈打到 stderr(之后每隔这么久再打一次)
+  "if os.environ.get('VIDROOM_COMFYUI_DUMP_STACKS_AFTER'):",
+  '    import faulthandler',
+  "    faulthandler.dump_traceback_later(int(os.environ['VIDROOM_COMFYUI_DUMP_STACKS_AFTER']), repeat=True, file=sys.stderr)",
   'main = os.path.abspath(sys.argv[1])',
   'sys.argv = [main] + sys.argv[2:]',
   'sys.path.insert(0, os.path.dirname(main))',
@@ -182,7 +198,7 @@ export class ComfyProcess {
         await sleep(500);
       }
     }
-    throw new Error(`ComfyUI ${Math.round(timeoutMs / 1000)} 秒内没有就绪:\n${this.out.slice(-4_000)}`);
+    throw new Error(`ComfyUI ${Math.round(timeoutMs / 1000)} 秒内没有就绪:\n${this.out.slice(-16_000)}`);
   }
 
   async stop(graceMs = STOP_GRACE_MS): Promise<StopResult> {

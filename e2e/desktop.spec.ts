@@ -73,8 +73,9 @@ function processTable(): ProcRow[] {
           [
             '-NoProfile',
             '-Command',
-            // 命令里不用双引号:Node 在 Windows 上转义参数时会改写双引号
-            `Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + '|' + [string]$_.ParentProcessId + '|' + $_.CommandLine }`,
+            // 命令里不用双引号:Node 在 Windows 上转义参数时会改写双引号。
+            // 命令行本身可能带换行(ComfyUI 的引导代码是多行的 -c 参数),先换成空格,保证一个进程一行
+            `Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + '|' + [string]$_.ParentProcessId + '|' + ($_.CommandLine -replace '[\\r\\n]+', ' ') }`,
           ],
           { encoding: 'utf8' },
         ).stdout

@@ -1,8 +1,9 @@
+import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDeepSeekModel } from './agent.js';
 import { dataDir } from './comfyui/install.js';
-import { ComfyManager, parseExtraArgs } from './comfyui/manager.js';
+import { ComfyManager, defaultMemoryLimitMiB, parseExtraArgs } from './comfyui/manager.js';
 import { probeGpu } from './gpu.js';
 import { ConsentStore } from './h3/license.js';
 import { VideoLibrary } from './h3/library.js';
@@ -24,6 +25,7 @@ const extraModelPaths = join(data, 'extra_model_paths.yaml');
 await writeExtraModelPaths(extraModelPaths, models);
 const comfy = new ComfyManager({
   extraArgs: ['--extra-model-paths-config', extraModelPaths, ...parseExtraArgs(process.env.VIDROOM_COMFYUI_ARGS)],
+  memoryLimitMiB: defaultMemoryLimitMiB(totalmem()),
 });
 const video = new VideoService({
   comfy,

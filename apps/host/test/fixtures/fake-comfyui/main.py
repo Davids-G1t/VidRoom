@@ -13,7 +13,7 @@
   FAKE_COMFY_REQUEST_LOG=<路径>  每个 POST /prompt 的请求体追加一行 JSON(测试核对「/prompt 有没有被调用、发了什么」)
   FAKE_COMFY_STEP_MS=<毫秒>  每一步采样的假耗时,默认 150
   FAKE_COMFY_FFMPEG=<路径>   ffmpeg 可执行文件,默认 PATH 上的 ffmpeg
-  FAKE_COMFY_EAT_MEMORY_MB=<n>  起来后每 100 毫秒多占 n MiB 内存、永不释放(测 Windows 作业对象内存上限)
+  FAKE_COMFY_EAT_MEMORY_MB=<n>  起来 2 秒后开始每 100 毫秒多占 n MiB 内存、永不释放(测 Windows 作业对象内存上限)
 """
 import argparse
 import base64
@@ -241,6 +241,7 @@ if os.environ.get('FAKE_COMFY_IGNORE_STOP') == '1':
 if os.environ.get('FAKE_COMFY_EAT_MEMORY_MB'):
     def eat():
         hog, step = [], int(os.environ['FAKE_COMFY_EAT_MEMORY_MB'])
+        time.sleep(2)
         while True:
             hog.append(bytearray(step * 1024 * 1024))  # bytearray 会写零,真提交内存
             print(f'[fake-comfy] 已占 {len(hog) * step} MiB', flush=True)

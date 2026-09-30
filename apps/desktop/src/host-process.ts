@@ -12,6 +12,21 @@ import type { HostToParent, SetKeyMessage } from '../../host/src/parent-ipc.js';
 
 const SESSION_COOKIE_RE = /(?:^|[;,]\s*)(vidroom_session=[0-9a-f]+)/;
 
+/**
+ * `VIDROOM_DEEPSEEK_BASE_URL` 只在 e2e 测试里用来把 LLM 请求指向本机假服务。
+ * 打包后的应用继承的是用户级环境变量(Windows 上改 HKCU\Environment 不需要管理员),
+ * 不收紧的话,攻击者只要设一个这个变量,就能让带着已解密 key 的请求悄悄发到任意地址。
+ * 只放行指向回环地址的值,其余一律当作没设置(返回 undefined)。
+ */
+export function sanitizeDeepSeekBaseURL(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(new URL(value).hostname) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface HostProcessOptions {
   /** Host 打包产物(host.mjs)路径 */
   script: string;
@@ -38,6 +53,12 @@ export class HostProcess {
     const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIDROOM_WEB_DIR: this.opts.webDir };
     // Host 在 IPC 模式下本来就不读 key 文件;这里也不把开发用的 key 文件路径传下去
     delete env.VIDROOM_DEEPSEEK_KEY_FILE;
+    const safeBaseURL = sanitizeDeepSeekBaseURL(env.VIDROOM_DEEPSEEK_BASE_URL);
+    if (env.VIDROOM_DEEPSEEK_BASE_URL && !safeBaseURL) {
+      log(`[vidroom-desktop] 忽略 VIDROOM_DEEPSEEK_BASE_URL(不是回环地址):${env.VIDROOM_DEEPSEEK_BASE_URL}`);
+    }
+    if (safeBaseURL) env.VIDROOM_DEEPSEEK_BASE_URL = safeBaseURL;
+    else delete env.VIDROOM_DEEPSEEK_BASE_URL;
     const child = fork(this.opts.script, [], {
       execPath: process.execPath,
       env,

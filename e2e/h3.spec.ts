@@ -56,7 +56,7 @@ async function startMirror(sourceDir: string): Promise<Mirror> {
 }
 
 test('出片:许可页 → 只下缺的视频 VAE → 聊一句出片(假回放)→ 作品库与「关于」标名 → 举报滥用', async ({ page }) => {
-  test.setTimeout(600_000);
+  test.setTimeout(2_400_000); // 核对 37 GB 权重 + 本机传 2.8 GB,机器忙时要很久
   const source = process.env.VIDROOM_E2E_H3_MODELS_DIR;
   expect(source, '需要设置 VIDROOM_E2E_H3_MODELS_DIR(已有完整 H3 权重的目录)').toBeTruthy();
   for (const f of H3_MODEL_FILES) {
@@ -143,7 +143,7 @@ test('出片:许可页 → 只下缺的视频 VAE → 聊一句出片(假回放)
     await dialog.getByRole('checkbox').check();
     const t0 = Date.now();
     await dialog.getByRole('button', { name: '同意并下载' }).click();
-    await expect(panel.getByTestId('h3-download')).toHaveText(`下载完成:vae/${VIDEO_VAE.fileName}`, { timeout: 480_000 });
+    await expect(panel.getByTestId('h3-download')).toHaveText(`下载完成:vae/${VIDEO_VAE.fileName}`, { timeout: 1_500_000 });
     console.log(`[h3] 核对 + 下载用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒,镜像收到的请求:${JSON.stringify(mirror.requests)}`);
     expect(mirror.requests).toEqual([`/vae/${VIDEO_VAE.fileName}`]);
     const consent = JSON.parse(readFileSync(consentFile, 'utf8'));

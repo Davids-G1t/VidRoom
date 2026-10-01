@@ -37,7 +37,13 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
 
   useEffect(() => {
     void refresh();
-    void fetchCloud().then(setCloud);
+    // 「配没配 key」从 Host 现问:浏览器里没有桌面桥,桌面版这里得到的结果与桥一致
+    void fetchCloud().then((c) => {
+      setCloud(c);
+      if (!c) return;
+      const configuredOf = (kind: CloudKind) => c.providers.find((p) => p.kind === kind)?.configured === true;
+      setCloudConfigured({ video: configuredOf('video'), image: configuredOf('image') });
+    });
     void api?.getCloudKeyStatus().then(setCloudConfigured);
     void fetchStatus().then((s) => setForceNoLocalGpu(s.kind === 'ok' ? s.forcedNoLocalGpu === true : null));
   }, [refresh, api]);

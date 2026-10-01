@@ -29,7 +29,7 @@ describe('云端估价卡', () => {
   });
 
   it('生图估价也能出卡', () => {
-    const image = { ...estimate, request: { kind: 'image', prompt: '一只橘猫', count: 2 } };
+    const image = { ...estimate, request: { kind: 'image', prompt: '一只橘猫' } };
     expect(cloudEstimates([{ toolName: 'cloud_generate_image', output: image }])).toHaveLength(1);
   });
 });

@@ -12,11 +12,11 @@ import {
   type CloudKind,
 } from './providers.js';
 import {
+  IMAGE_CENTS_PER_IMAGE,
   VIDEO_MAX_SECONDS,
   VIDEO_MIN_SECONDS,
   describeImagePrice,
   describeVideoPrice,
-  imageCostCents,
   videoCostCents,
   type CloudResolution,
 } from './pricing.js';
@@ -36,7 +36,6 @@ export interface CloudVideoInput {
 
 export interface CloudImageInput {
   prompt: string;
-  count?: number;
 }
 
 export interface CloudEstimate {
@@ -135,15 +134,13 @@ export class CloudService {
   estimateImage(input: CloudImageInput): CloudEstimate {
     const prompt = String(input.prompt ?? '').trim();
     if (!prompt) throw new Error('要给出提示词(prompt)。');
-    const count = input.count ?? 1;
-    if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error('张数只能是 1–4 的整数。');
-    const request = { kind: 'image' as const, prompt, count };
+    const request = { kind: 'image' as const, prompt };
     return {
       kind: 'image',
       provider: CLOUD_PROVIDERS.image.label,
       model: CLOUD_PROVIDERS.image.model,
-      estimateCents: imageCostCents(count),
-      estimateText: describeImagePrice(count),
+      estimateCents: IMAGE_CENTS_PER_IMAGE,
+      estimateText: describeImagePrice(),
       request,
     };
   }
@@ -196,14 +193,14 @@ export class CloudService {
 
   async generateImage(input: CloudImageInput): Promise<CloudResult> {
     const est = this.estimateImage(input);
-    const { prompt, count = 1 } = est.request as CloudImageInput;
+    const { prompt } = est.request as CloudImageInput;
     const key = this.keys.image;
     if (key === null) return { ok: false, reason: `还没配置${CLOUD_PROVIDERS.image.label}的 API key,去设置里填。` };
     try {
       const result = await generateImage({
         model: createCloudImageModel(key, cloudBaseUrl('image', this.o.env)),
         prompt: prompt,
-        n: count,
+        n: 1,
         // 方舟默认给图片加水印,显式关掉
         providerOptions: { bytedance: { watermark: false } },
       });
@@ -214,7 +211,7 @@ export class CloudService {
       await mkdir(dir, { recursive: true });
       const file = join(dir, `${id}.png`);
       await writeFile(file, first.uint8Array);
-      this.o.log?.(`[cloud] 图片 ${id} 完成(${count} 张,估价 ${est.estimateText})`);
+      this.o.log?.(`[cloud] 图片 ${id} 完成(估价 ${est.estimateText})`);
       return { ok: true, kind: 'image', image: { id, file } };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);

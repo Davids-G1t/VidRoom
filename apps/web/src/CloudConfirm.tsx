@@ -32,7 +32,7 @@ const TITLES: Record<string, string> = { cloud_generate_video: '云端生视频'
 function describe(request: CloudRequest): string {
   return request.kind === 'video'
     ? `提示词:${request.prompt}(${request.seconds} 秒,${request.resolution})`
-    : `提示词:${request.prompt}(${request.count} 张)`;
+    : `提示词:${request.prompt}(1 张)`;
 }
 
 /**

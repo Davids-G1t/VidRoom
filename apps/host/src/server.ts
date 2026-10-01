@@ -332,7 +332,7 @@ async function handleCloudApi(cloud: CloudService, req: IncomingMessage, res: Se
               resolution: b.resolution === '1080p' ? '1080p' : b.resolution === '720p' ? '720p' : undefined,
             })
           : kind === 'image'
-            ? await cloud.generateImage({ prompt: String(b.prompt ?? ''), count: typeof b.count === 'number' ? b.count : undefined })
+            ? await cloud.generateImage({ prompt: String(b.prompt ?? '') })
             : null;
       if (result === null) {
         sendJson(res, 400, { error: 'bad_request', message: 'kind 只能是 video 或 image。' });

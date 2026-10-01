@@ -35,10 +35,10 @@ describe('CloudService 的估价(不发请求、不花钱)', () => {
     expect(est.request).toEqual({ kind: 'video', prompt: '猫', seconds: 5, resolution: '720p' });
   });
 
-  it('生图估价按张算', () => {
-    const est = service().estimateImage({ prompt: '猫', count: 3 });
-    expect(est.estimateCents).toBe(66);
-    expect(est.request).toEqual({ kind: 'image', prompt: '猫', count: 3 });
+  it('生图估价就是一张的价,张数这个活口已去掉(付了钱丢图的坑)', () => {
+    const est = service().estimateImage({ prompt: '猫' });
+    expect(est.estimateCents).toBe(22);
+    expect(est.request).toEqual({ kind: 'image', prompt: '猫' });
   });
 
   it('参数不合格当场报错,不落到「发请求才发现」', () => {
@@ -48,8 +48,7 @@ describe('CloudService 的估价(不发请求、不花钱)', () => {
     expect(() => cloud.estimateVideo({ prompt: '猫', seconds: 16 })).toThrow('2–15');
     expect(() => cloud.estimateVideo({ prompt: '猫', seconds: 5.5 })).toThrow('整数秒');
     expect(() => cloud.estimateVideo({ prompt: '猫', resolution: '4k' as never })).toThrow('720p');
-    expect(() => cloud.estimateImage({ prompt: '猫', count: 0 })).toThrow('1–4');
-    expect(() => cloud.estimateImage({ prompt: '猫', count: 9 })).toThrow('1–4');
+    expect(() => cloud.estimateImage({ prompt: '   ' })).toThrow('提示词');
   });
 });
 

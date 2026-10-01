@@ -5,7 +5,6 @@ import {
   describeImagePrice,
   describeVideoPrice,
   formatYuan,
-  imageCostCents,
   videoCostCents,
 } from '../src/cloud/pricing.js';
 
@@ -17,15 +16,11 @@ describe('云端估价表', () => {
     expect(Number.isInteger(videoCostCents(7, '1080p'))).toBe(true);
   });
 
-  it('生图按张算钱', () => {
-    expect(imageCostCents(1)).toBe(IMAGE_CENTS_PER_IMAGE);
-    expect(imageCostCents(4)).toBe(4 * IMAGE_CENTS_PER_IMAGE);
-  });
-
   it('给用户看的话里带价钱,元与分换算对', () => {
     expect(formatYuan(60)).toBe('¥0.60');
     expect(formatYuan(22)).toBe('¥0.22');
     expect(describeVideoPrice(5, '720p')).toBe('5 秒 720P 视频,估价 ¥3.00(按 ¥0.60/秒)');
-    expect(describeImagePrice(2)).toBe('2 张图片,估价 ¥0.44(按 ¥0.22/张)');
+    expect(describeImagePrice()).toBe('1 张图片,估价 ¥0.22(按 ¥0.22/张)');
+    expect(IMAGE_CENTS_PER_IMAGE).toBe(22);
   });
 });

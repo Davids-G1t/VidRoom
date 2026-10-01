@@ -251,7 +251,7 @@ export interface CloudStatus {
 /** 云端参数(估价工具原样带回来的那一份,确认时原样发回去) */
 export type CloudRequest =
   | { kind: 'video'; prompt: string; seconds: number; resolution: '720p' | '1080p' }
-  | { kind: 'image'; prompt: string; count: number };
+  | { kind: 'image'; prompt: string };
 
 export type CloudGenerateResult =
   | { ok: true; kind: 'video'; video: VideoRecord }

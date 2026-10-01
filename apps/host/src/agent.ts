@@ -160,11 +160,10 @@ function cloudTools(cloud: CloudService): ToolSet {
     }),
     cloud_generate_image: tool({
       description:
-        '云端(火山方舟 Seedream)生成图片。**只算价钱并返回估价,不发请求、不花钱**;用户点确认后才生成。' +
+        '云端(火山方舟 Seedream)生成一张图片。**只算价钱并返回估价,不发请求、不花钱**;用户点确认后才生成。' +
         '返回 { status: "needs_confirmation", estimateText, estimateCents, request }。',
       inputSchema: z.object({
         prompt: z.string().describe('中文提示词'),
-        count: z.number().default(1).describe('张数,1–4;用户没说就用 1'),
       }),
       execute: async (input) => attempt(() => cloud.estimateImage(input)),
     }),

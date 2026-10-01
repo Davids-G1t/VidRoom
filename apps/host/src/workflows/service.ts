@@ -115,9 +115,10 @@ export class WorkflowService implements WorkflowStore {
 
   async startRun(id: string, topic: string): Promise<WorkflowJobState> {
     await this.ensure();
-    if (!this.model) throw new WorkflowNoKeyError();
     if (this.running) throw new WorkflowBusyError();
     const def = await readSkillFile(this.skillPath(id), id);
+    // 只有要 LLM 写文案的工作流才需要 key;纯剪辑类工作流没有 key 也照跑。
+    if (!this.model && def.steps.some((s) => s.tool === 'write_script')) throw new WorkflowNoKeyError();
     const runner = new WorkflowRunner(def, {
       model: this.model,
       tools: this.tools,

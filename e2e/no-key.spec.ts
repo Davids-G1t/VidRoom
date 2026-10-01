@@ -12,7 +12,7 @@ const cases = [
 ];
 
 for (const c of cases) {
-  test(`不给 key(${c.title}):页面提示去设置,预设工作流入口可见`, async ({ page, request }) => {
+  test(`不给 key(${c.title}):页面提示去设置,工作流库可见`, async ({ page, request }) => {
     const host = await startHostProcess(c.env());
     try {
       // 不带 cookie 的 API 请求被拒

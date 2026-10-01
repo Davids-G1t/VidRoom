@@ -17,6 +17,12 @@ const ScriptSchema = z.object({
   shots: z.array(z.object({ prompt: z.string().min(1) })),
 });
 
+/** ai-sdk `tool()` 造出来的东西里,runner 只用到这两件:参数校验与执行。 */
+interface WorkflowToolLike {
+  inputSchema?: { parse?(value: unknown): unknown };
+  execute?(input: unknown, options: { toolCallId: string }): Promise<unknown>;
+}
+
 export interface WorkflowRunnerOptions {
   model: LanguageModel | null;
   tools: AgentDeps;
@@ -108,8 +114,9 @@ export class WorkflowRunner {
   private async runOnce(step: WorkflowStep, ctx: Record<string, unknown>): Promise<unknown> {
     if (step.tool === 'write_script') return this.writeScript(ctx.topic, step.args?.shots);
     const args = resolveTemplate(step.args ?? {}, ctx) as Record<string, unknown>;
-    const tools = createTools(this.o.tools);
-    const t = (tools as Record<string, any>)[step.tool];
+    // ai-sdk 的工具签名带具体入参类型,这里按「schema + execute」这一窄面用,故先收窄再取。
+    const tools = createTools(this.o.tools) as unknown as Record<string, WorkflowToolLike>;
+    const t = tools[step.tool];
     if (!t?.execute) throw new Error(`工具 ${step.tool} 不可用`);
     const parsed = t.inputSchema?.parse ? t.inputSchema.parse(args) : args;
     const output = await t.execute(parsed, { toolCallId: `workflow-${step.id}` });

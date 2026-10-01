@@ -140,6 +140,16 @@ test('工作流库:默认工作流跑通,自定义工作流重启后可跑,可�
     await custom.getByRole('button', { name: '看原文' }).click();
     await expect(page.getByLabel('SKILL.md 原文')).toContainText('name: custom-topic-video');
     await expect(page.getByLabel('SKILL.md 原文')).toContainText('```workflow');
+
+    // 库里能改:改完保存要落盘,刷新后还在
+    const textarea = page.getByLabel('SKILL.md 原文');
+    await textarea.fill((await textarea.inputValue()).replace('测试保存的主题成片流程', '改过的描述'));
+    await page.getByRole('button', { name: '保存原文' }).click();
+    await expect(page.getByTestId('notice')).toContainText('工作流已保存', { timeout: 15_000 });
+    expect(readFileSync(join(dataDir, 'workflows', 'custom-topic-video', 'SKILL.md'), 'utf8')).toContain('改过的描述');
+    await page.reload();
+    await page.getByTestId('workflow-custom-topic-video').getByRole('button', { name: '看原文' }).click();
+    await expect(page.getByLabel('SKILL.md 原文')).toContainText('改过的描述');
     await page.getByLabel('工作流主题').fill('橘猫重启后再次出片');
     await custom.getByRole('button', { name: '运行' }).click();
     await expect(page.getByTestId('workflow-job')).toContainText('完成', { timeout: 120_000 });

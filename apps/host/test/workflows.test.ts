@@ -96,6 +96,19 @@ describe('工作流 runner', () => {
 });
 
 describe('WorkflowService', () => {
+  it('没有 key 时只拦含 write_script 的工作流,纯剪辑工作流照跑', async () => {
+    const root = testDir('workflow-service-nokey');
+    dirs.push(root);
+    const service = new WorkflowService(root, null, { editor: { list: async () => [] } } as never);
+    await service.saveWorkflow({ name: 'clip-only', title: '纯剪辑', description: '不需要 LLM', steps: [{ id: 'only', tool: 'list_videos', args: {} }] });
+
+    expect((await service.startRun('clip-only', '主题')).state).toBe('running');
+    await service.waitForIdle();
+    expect((await service.job()).state).toBe('done');
+
+    await expect(service.startRun('topic-to-video', '主题')).rejects.toBeInstanceOf(WorkflowNoKeyError);
+  });
+
   it('物化默认 SKILL.md,save_workflow 真写文件,source 拒绝坏内容', async () => {
     const root = testDir('workflow-service');
     dirs.push(root);

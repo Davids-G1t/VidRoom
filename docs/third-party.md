@@ -71,6 +71,16 @@ VidRoom 的做法:**不让 HyperFrames 自己下载**。`apps/host/src/motion/br
 
 代价:第一次渲染要多下载约 114 MB。之后放在数据目录里复用,换 VidRoom 版本也不用重下(除非锁定版本变了)。
 
+## LLM 提供方 SDK(`@ai-sdk/*`)
+
+| 项 | 值 |
+|---|---|
+| 是什么 | [vercel/ai](https://github.com/vercel/ai)(AI SDK):统一的模型调用层。`@ai-sdk/anthropic` 走 Anthropic 的 Messages API,`@ai-sdk/deepseek` 走 DeepSeek 的 API |
+| 版本 | `@ai-sdk/anthropic@4.0.70`(第 5 批新增)、`@ai-sdk/deepseek@3.0.57`(第 5 批之前就有),由 `pnpm-lock.yaml` 锁版本 |
+| 许可 | 两个都是 Apache-2.0(2026-10-01 查 npm registry 元数据核实) |
+| 怎么来 | `pnpm install`,与其它运行时依赖一样随应用打包分发,不单独下载、不跑安装脚本 |
+| 怎么用 | `apps/host` 按用户选的提供方建模型实例,只用它发 HTTP 请求。不含任何模型权重,API key 由用户在设置里填、存 `safeStorage` |
+
 ## 借鉴但没有引入代码的项目
 
 - [tuzhechen2005/opus-video-skills](https://github.com/tuzhechen2005/opus-video-skills)(MIT):只借了「分镜 → 构建 → 审查 → 编码」这个流程顺序,代码是自己写的(`apps/host/src/motion/storyboard.ts`、`service.ts`)。

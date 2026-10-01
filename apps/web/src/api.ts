@@ -184,6 +184,7 @@ export interface WorkflowSummary {
   description: string;
   builtin: boolean;
   steps: number;
+  needsLocalGpu: boolean;
   updatedAt: string | null;
 }
 

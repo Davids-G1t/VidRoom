@@ -12,7 +12,7 @@ import {
 interface Props {
   onNotice(message: string): void;
   onVideosChanged(): void;
-  /** 本机跑不动(没显卡档)时为真:工作流的「运行」就是本地出片入口,这时不显示 */
+  /** 本机没显卡档时为真:只有吃显卡的工作流(步骤里有本地出片)不显示「运行」 */
   localDisabled?: boolean;
 }
 
@@ -91,9 +91,9 @@ export function WorkflowPanel({ onNotice, onVideosChanged, localDisabled = false
               <small>{w.steps} 步</small>
             </div>
             <div className="workflow-actions">
-              {localDisabled ? (
+              {localDisabled && w.needsLocalGpu ? (
                 <span className="notice" data-testid="workflow-local-disabled">
-                  本机显卡跑不动,工作流里的本地出片先跑不了 —— 在下面聊天框说一句,走云端
+                  要本机显卡出片,这台机器跑不动 —— 在下面聊天框说一句,走云端
                 </span>
               ) : (
                 <button type="button" data-testid={`workflow-run-${w.id}`} onClick={() => run(w.id)} disabled={running}>

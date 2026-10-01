@@ -42,6 +42,8 @@ export interface WorkflowSummary {
   description: string;
   builtin: boolean;
   steps: number;
+  /** 步骤里有本地出片(generate_video)时为真:没显卡档时前端拿它决定收不收「运行」 */
+  needsLocalGpu: boolean;
   updatedAt: string | null;
 }
 
@@ -192,6 +194,8 @@ export function toSummary(def: WorkflowDefinition): WorkflowSummary {
     description: def.description,
     builtin: def.builtin,
     steps: def.steps.length,
+    // 只有本地出片这一步吃显卡;剪拼、烧字幕、代码渲染(render_motion)没显卡也能跑
+    needsLocalGpu: def.steps.some((s) => s.tool === 'generate_video'),
     updatedAt: def.updatedAt ?? null,
   };
 }

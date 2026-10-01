@@ -131,5 +131,10 @@ describe('WorkflowService', () => {
     expect(existsSync(saved.path)).toBe(true);
     expect(readFileSync(saved.path, 'utf8')).toContain('name: saved-flow');
     await expect(service.saveSource('saved-flow', 'bad')).rejects.toThrow(/frontmatter/);
+
+    // 没显卡档时前端拿 needsLocalGpu 决定收不收「运行」:只有含本地出片的工作流该收
+    const summaries = await service.list();
+    expect(summaries.find((w) => w.id === 'topic-to-video')?.needsLocalGpu).toBe(true);
+    expect(summaries.find((w) => w.id === 'saved-flow')?.needsLocalGpu).toBe(false);
   });
 });

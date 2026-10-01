@@ -93,12 +93,13 @@ test('云端生成:估价不花钱、确认门槛、档位开关', async ({ page
     await expect(page.getByTestId('h3-panel')).toHaveCount(0);
     // 工作流库里那个「运行」跑的就是本地出片那一步,同属本机出片入口,这时也不该在
     await expect(page.getByTestId('workflow-local-disabled').first()).toBeVisible();
-    await expect(page.locator('[data-testid^="workflow-run-"]')).toHaveCount(0);
+    await expect(page.getByTestId('workflow-run-topic-to-video')).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath('cloud-hint.png') });
     await page.getByTestId('force-no-gpu').uncheck();
     await expect(page.getByTestId('h3-panel')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('cloud-panel')).toHaveCount(0);
     await expect(page.getByTestId('workflow-local-disabled')).toHaveCount(0);
+    await expect(page.getByTestId('workflow-run-topic-to-video')).toBeVisible();
   } finally {
     await host.stop();
     await fake.close();

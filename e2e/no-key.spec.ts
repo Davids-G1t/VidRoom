@@ -28,7 +28,16 @@ for (const c of cases) {
 
       const workflows = page.getByTestId('workflow-library');
       await expect(workflows).toBeVisible();
-      await expect(workflows.getByRole('button', { name: '运行' })).not.toHaveCount(0);
+      // 工作流库本身一直在;里面那个「运行」在不在要看这台机器出不出得了片(合同第 6b 批验收①):
+      // 有本机出片的档位就在,没显卡档就换成一行说明 —— 云上跑和本机跑是两件不同的事
+      const status = (await page.evaluate(async () => (await fetch('/api/status')).json())) as { tier: string };
+      const localCanGen = status.tier !== 'none' && status.tier !== 'unsupported';
+      if (localCanGen) {
+        await expect(workflows.getByRole('button', { name: '运行' })).not.toHaveCount(0);
+      } else {
+        await expect(workflows.getByRole('button', { name: '运行' })).toHaveCount(0);
+        await expect(page.getByTestId('workflow-local-disabled').first()).toBeVisible();
+      }
       await expect(page.getByLabel('输入消息')).toBeDisabled();
 
       // 启动地址只能兑换一次

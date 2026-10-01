@@ -25,6 +25,30 @@ test('云端生成:估价不花钱、确认门槛、档位开关', async ({ page
   const keyFile = join(root, 'fake-key.txt');
   writeFileSync(keyFile, 'fake-deepseek-key-for-cloud-e2e');
 
+  // 另放一个不吃显卡的工作流(只列片):没显卡档时它必须照跑 —— 收的是「吃显卡的本地出片」,
+  // 不是整个工作流库(合同第 6b 批:这一档「默认走这里和代码渲染视频」)
+  const concatDir = join(dataDir, 'workflows', 'concat-only');
+  mkdirSync(concatDir, { recursive: true });
+  writeFileSync(
+    join(concatDir, 'SKILL.md'),
+    [
+      '---',
+      'name: concat-only',
+      'title: 只剪拼',
+      'description: 不吃显卡:只把库里的片子列出来',
+      '---',
+      '# 只剪拼',
+      '',
+      '```workflow',
+      'steps:',
+      '  - id: listed',
+      '    tool: list_videos',
+      '    args: {}',
+      '```',
+      '',
+    ].join('\n'),
+  );
+
   const fake = await startFakeLlm();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -94,12 +118,15 @@ test('云端生成:估价不花钱、确认门槛、档位开关', async ({ page
     // 工作流库里那个「运行」跑的就是本地出片那一步,同属本机出片入口,这时也不该在
     await expect(page.getByTestId('workflow-local-disabled').first()).toBeVisible();
     await expect(page.getByTestId('workflow-run-topic-to-video')).toHaveCount(0);
+    // 不吃显卡的那个工作流照旧能跑 —— 收的是吃显卡的本地出片,不是整个工作流库
+    await expect(page.getByTestId('workflow-run-concat-only')).toBeVisible();
     await page.screenshot({ path: test.info().outputPath('cloud-hint.png') });
     await page.getByTestId('force-no-gpu').uncheck();
     await expect(page.getByTestId('h3-panel')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('cloud-panel')).toHaveCount(0);
     await expect(page.getByTestId('workflow-local-disabled')).toHaveCount(0);
     await expect(page.getByTestId('workflow-run-topic-to-video')).toBeVisible();
+    await expect(page.getByTestId('workflow-run-concat-only')).toBeVisible();
   } finally {
     await host.stop();
     await fake.close();

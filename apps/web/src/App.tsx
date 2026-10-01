@@ -68,7 +68,9 @@ export function App() {
   const hasKey = status?.kind === 'ok' && status.hasApiKey;
   const noKey = status?.kind === 'ok' && !status.hasApiKey;
   // 本机跑不动:没 N 卡、显存太小,或用户在设置里强制「不用本机显卡」。
-  // 这时本地出片入口整个不显示,换成云端入口 —— 两件事要一起发生(合同第 6b 批验收①)。
+  // 这时本机出片的两处入口都不显示 —— 直接的「MiniMax H3 出片」面板,和工作流库里那个「运行」
+  // (默认工作流里就有本地出片那一步)—— 换渲染云端入口。两件事要一起发生(合同第 6b 批验收①)。
+  // ComfyUI 面板留着:它只起停引擎,不自己出片。
   const localDisabled = status?.kind === 'ok' && (status.tier === 'none' || status.tier === 'unsupported');
   const cloudConfigured = status?.kind === 'ok' && (status.cloud?.video === true || status.cloud?.image === true);
   const refreshVideos = () => void fetchVideos().then(setVideos);
@@ -156,7 +158,11 @@ export function App() {
         <Settings onSaved={() => fetchStatus().then(setStatus)} onClose={() => setSettingsOpen(false)} />
       )}
 
-      <WorkflowPanel onNotice={setNotice} onVideosChanged={() => fetchVideos().then(setVideos)} />
+      <WorkflowPanel
+        localDisabled={localDisabled}
+        onNotice={setNotice}
+        onVideosChanged={() => fetchVideos().then(setVideos)}
+      />
 
       {!localDisabled && <H3Panel />}
 

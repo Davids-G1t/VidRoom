@@ -12,6 +12,8 @@ import {
 interface Props {
   onNotice(message: string): void;
   onVideosChanged(): void;
+  /** 本机跑不动(没显卡档)时为真:工作流的「运行」就是本地出片入口,这时不显示 */
+  localDisabled?: boolean;
 }
 
 function jobText(job: WorkflowJob | null): string {
@@ -24,7 +26,7 @@ function jobText(job: WorkflowJob | null): string {
   return `工作流失败:${job.error}`;
 }
 
-export function WorkflowPanel({ onNotice, onVideosChanged }: Props) {
+export function WorkflowPanel({ onNotice, onVideosChanged, localDisabled = false }: Props) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [topic, setTopic] = useState('橘猫在书桌边做晚间创作');
@@ -89,9 +91,15 @@ export function WorkflowPanel({ onNotice, onVideosChanged }: Props) {
               <small>{w.steps} 步</small>
             </div>
             <div className="workflow-actions">
-              <button type="button" onClick={() => run(w.id)} disabled={running}>
-                运行
-              </button>
+              {localDisabled ? (
+                <span className="notice" data-testid="workflow-local-disabled">
+                  本机显卡跑不动,工作流里的本地出片先跑不了 —— 在下面聊天框说一句,走云端
+                </span>
+              ) : (
+                <button type="button" data-testid={`workflow-run-${w.id}`} onClick={() => run(w.id)} disabled={running}>
+                  运行
+                </button>
+              )}
               <button type="button" onClick={() => setSelected(w.id)}>
                 看原文
               </button>

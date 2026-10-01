@@ -12,12 +12,15 @@ import type { RunNvidiaSmi } from './gpu.js';
 import type { ComfyManager } from './comfyui/manager.js';
 import { publicVideo } from './h3/library.js';
 import type { VideoService } from './h3/service.js';
+import { NO_KEY_MESSAGE } from './messages.js';
 import type { MotionService } from './motion/service.js';
+import { WorkflowBusyError, WorkflowService } from './workflows/service.js';
+import { WorkflowNoKeyError } from './workflows/runner.js';
+
+export { NO_KEY_MESSAGE } from './messages.js';
 
 /** 写死只听本机回环地址 */
 export const LISTEN_HOST = '127.0.0.1';
-
-export const NO_KEY_MESSAGE = '没有配置 API key,请去设置。';
 
 export interface HostOptions {
   /** 已加载的 LLM 模型;null 表示没配置 key */
@@ -36,6 +39,8 @@ export interface HostOptions {
   editor?: VideoEditor;
   /** 代码渲染服务;不给就没有 render_motion 工具 */
   motion?: MotionService;
+  /** 工作流库;不给就没有 /api/workflows 接口和 save_workflow 工具 */
+  workflows?: WorkflowService;
 }
 
 export interface Host {
@@ -151,7 +156,13 @@ export async function startHost(opts: HostOptions): Promise<Host> {
         return;
       }
       try {
-        const reply = await runChat(model, messages, { runNvidiaSmi: opts.runNvidiaSmi, video: opts.video, editor: opts.editor, motion: opts.motion });
+        const reply = await runChat(model, messages, {
+          runNvidiaSmi: opts.runNvidiaSmi,
+          video: opts.video,
+          editor: opts.editor,
+          motion: opts.motion,
+          workflows: opts.workflows,
+        });
         sendJson(res, 200, reply);
       } catch (err) {
         console.error('[vidroom] 调用 LLM 失败:', redact(err instanceof Error ? err.message : String(err), secrets));
@@ -176,6 +187,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     }
 
     if (opts.video && (await handleVideoApi(opts.video, req, res, pathname, url))) return;
+    if (opts.workflows && (await handleWorkflowApi(opts.workflows, req, res, pathname))) return;
 
     sendJson(res, 404, { error: 'not_found' });
   }
@@ -233,6 +245,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     launchUrl: `http://${LISTEN_HOST}:${port}/launch?token=${auth.token}`,
     setModel: (m, s) => {
       model = m;
+      opts.workflows?.setModel(m);
       secrets = s;
     },
     close: async () => {
@@ -240,6 +253,60 @@ export async function startHost(opts: HostOptions): Promise<Host> {
       await new Promise<void>((ok, fail) => server.close((e) => (e ? fail(e) : ok())));
     },
   };
+}
+
+async function handleWorkflowApi(workflows: WorkflowService, req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
+  const method = req.method;
+  if (pathname === '/api/workflows' && method === 'GET') {
+    sendJson(res, 200, { workflows: await workflows.list() });
+    return true;
+  }
+  if (pathname === '/api/workflows/job' && method === 'GET') {
+    sendJson(res, 200, workflows.job());
+    return true;
+  }
+  const source = /^\/api\/workflows\/([a-z0-9-]+)\/source$/.exec(pathname);
+  if (source && method === 'GET') {
+    try {
+      sendJson(res, 200, { source: await workflows.source(source[1]) });
+    } catch {
+      sendJson(res, 404, { error: 'not_found' });
+    }
+    return true;
+  }
+  if (source && method === 'PUT') {
+    let body: unknown;
+    try {
+      body = await readJson(req);
+      const text = String((body as { source?: unknown })?.source ?? '');
+      sendJson(res, 200, { workflow: await workflows.saveSource(source[1], text) });
+    } catch (err) {
+      sendJson(res, 400, { error: 'bad_workflow', message: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+  const run = /^\/api\/workflows\/([a-z0-9-]+)\/run$/.exec(pathname);
+  if (run && method === 'POST') {
+    let topic = '';
+    try {
+      topic = String(((await readJson(req)) as { topic?: unknown })?.topic ?? '').trim();
+    } catch {
+      // 当成空
+    }
+    if (!topic) {
+      sendJson(res, 400, { error: 'bad_request', message: '需要 { topic }。' });
+      return true;
+    }
+    try {
+      sendJson(res, 202, await workflows.startRun(run[1], topic));
+    } catch (err) {
+      if (err instanceof WorkflowNoKeyError) sendJson(res, 503, { error: 'no_api_key', message: err.message });
+      else if (err instanceof WorkflowBusyError) sendJson(res, 409, { error: 'workflow_busy', message: err.message });
+      else sendJson(res, 400, { error: 'bad_workflow', message: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+  return false;
 }
 
 /** 出片相关接口;处理了返回 true */

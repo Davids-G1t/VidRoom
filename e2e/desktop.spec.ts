@@ -169,7 +169,7 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
     const { page } = first;
     await expect(page).toHaveURL(/^vidroom-app:\/\/app\//);
     await expect(page.getByTestId('no-key-notice')).toBeVisible();
-    await expect(page.getByTestId('preset-workflows')).toBeVisible();
+    await expect(page.getByTestId('workflow-library')).toBeVisible();
 
     // 安全边界:页面里没有 Node,桥上只有这四个函数;窗口的 webPreferences 如设计
     const surface = await page.evaluate(() => ({
@@ -297,7 +297,7 @@ test('没有任务在跑时关窗:不问,直接退出,Host 不残留', async () 
   try {
     const run = await launch(mkdtempSync(join(tmpdir(), 'vidroom-desktop-e2e-')), fake);
     const hostPid = await run.hostPid();
-    await expect(run.page.getByTestId('preset-workflows')).toBeVisible();
+    await expect(run.page.getByTestId('workflow-library')).toBeVisible();
     await run.app.evaluate(({ dialog }) => {
       dialog.showMessageBox = (async () => {
         throw new Error('不该弹询问');

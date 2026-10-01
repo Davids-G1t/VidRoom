@@ -26,9 +26,9 @@ for (const c of cases) {
       await expect(notice).toContainText('没有配置 API key');
       await expect(notice.getByRole('link', { name: '去设置' })).toBeVisible();
 
-      const presets = page.getByTestId('preset-workflows');
-      await expect(presets).toBeVisible();
-      await expect(presets.getByRole('button')).not.toHaveCount(0);
+      const workflows = page.getByTestId('workflow-library');
+      await expect(workflows).toBeVisible();
+      await expect(workflows.getByRole('button', { name: '运行' })).not.toHaveCount(0);
       await expect(page.getByLabel('输入消息')).toBeDisabled();
 
       // 启动地址只能兑换一次

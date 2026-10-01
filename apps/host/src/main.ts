@@ -17,6 +17,7 @@ import { ensureBrowser } from './motion/browser.js';
 import { MotionService } from './motion/service.js';
 import { parseParentMessage, type HostToParent } from './parent-ipc.js';
 import { startHost } from './server.js';
+import { WorkflowService } from './workflows/service.js';
 
 const webDir = process.env.VIDROOM_WEB_DIR ?? fileURLToPath(new URL('../../web/dist', import.meta.url));
 const port = Number(process.env.VIDROOM_PORT ?? 0);
@@ -56,6 +57,7 @@ const motion = new MotionService({
   homeDir: join(data, 'runtime', 'hyperframes-home'),
   log: (m) => console.log(m),
 });
+const workflows = new WorkflowService(join(data, 'workflows'), null, { video, editor, motion });
 
 const modelFor = (provider: LlmProvider, apiKey: string | null) =>
   apiKey ? createModel(provider, apiKey, process.env[BASE_URL_ENVS[provider]] || undefined) : null;
@@ -78,12 +80,14 @@ if (process.send) {
       return;
     }
     const secrets = msg.apiKey ? [msg.apiKey] : [];
+    const nextModel = modelFor(msg.provider, msg.apiKey);
+    workflows.setModel(nextModel);
     if (host === null) {
       // 第一条 set-key 到了才起服务,页面第一次查状态时 key 已就位
-      host = await startHost({ model: modelFor(msg.provider, msg.apiKey), webDir, port, secrets, comfy, video, editor, motion });
+      host = await startHost({ model: nextModel, webDir, port, secrets, comfy, video, editor, motion, workflows });
       send({ type: 'ready', launchUrl: host.launchUrl });
     } else {
-      host.setModel(modelFor(msg.provider, msg.apiKey), secrets);
+      host.setModel(nextModel, secrets);
     }
     send({ type: 'key-applied', hasApiKey: msg.apiKey !== null });
   };
@@ -109,7 +113,9 @@ if (process.send) {
 } else {
   const provider = providerFromEnv();
   const apiKey = loadKey(provider);
-  const host = await startHost({ model: modelFor(provider, apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video, editor, motion });
+  const initialModel = modelFor(provider, apiKey);
+  workflows.setModel(initialModel);
+  const host = await startHost({ model: initialModel, webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video, editor, motion, workflows });
 
   if (!apiKey) {
     console.log(`[vidroom] 没有配置 ${PROVIDER_LABELS[provider]} API key(环境变量 ${KEY_FILE_ENVS[provider]} 未设置或文件不存在),聊天功能不可用。`);

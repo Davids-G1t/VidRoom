@@ -35,16 +35,61 @@ h2 {
   color: #663c00;
 }
 
-.presets {
+.workflows {
   border: 1px solid #8884;
   border-radius: 8px;
   padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.preset-buttons {
+.workflow-topic {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workflow-topic input,
+.workflow-source textarea {
+  font: inherit;
+  padding: 6px 8px;
+}
+
+.workflow-list {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  flex-wrap: wrap;
+}
+
+.workflow-card {
+  border: 1px solid #8883;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workflow-card p {
+  margin: 4px 0;
+}
+
+.workflow-actions {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.workflow-source {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workflow-source textarea {
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .comfy {

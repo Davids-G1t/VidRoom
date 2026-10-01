@@ -7,6 +7,7 @@ import { probeGpu, type RunNvidiaSmi } from './gpu.js';
 import { MAX_SECONDS, PROMPT_MAX_WORDS, PROMPT_MIN_WORDS, type VideoService } from './h3/service.js';
 import type { LlmProvider } from './llm-provider.js';
 import type { MotionService } from './motion/service.js';
+import { SaveWorkflowInputSchema, type WorkflowStore } from './workflows/skill.js';
 import {
   MOTION_MAX_SECONDS,
   MOTION_MIN_SECONDS,
@@ -59,6 +60,9 @@ export const SYSTEM_PROMPT = [
   `风格用 style:${MOTION_STYLES.map((s) => `${s}=${STYLE_LABELS[s]}`).join(',')};用户没指定就用 gradient。`,
   '工具会自己拆分镜、渲染、做交付前自检(时长、冻帧、联系表),再放进作品库。',
   '成功后告诉用户:这条是代码渲染的(不是 AI 生成)、风格、时长和分镜;ok=false 时如实转告 reason。',
+  '\n\n【保存工作流】用户表达「以后都这样做」「保存这个流程」等意图时,如果你刚刚实际调用过工具完成一串步骤,调用 save_workflow。',
+  '保存时把刚才实际做过的工具步骤写进 steps;和本次具体主题相关的参数改成 {{topic}},上一步输出用 {{步骤id.字段}} 引用。',
+  '不要猜测不存在的步骤;不要靠关键词表判断用户意图,按整句话的意图决定是否保存。',
 ].join('');
 
 export interface ChatMessage {
@@ -86,6 +90,8 @@ export interface AgentDeps {
   editor?: VideoEditor;
   /** 不给就没有 render_motion 工具 */
   motion?: MotionService;
+  /** 不给就没有 save_workflow 工具 */
+  workflows?: WorkflowStore;
 }
 
 function motionTool(motion: MotionService): ToolSet {
@@ -101,6 +107,17 @@ function motionTool(motion: MotionService): ToolSet {
         style: z.enum(MOTION_STYLES).default('gradient').describe(MOTION_STYLES.map((s) => `${s}=${STYLE_LABELS[s]}`).join(';')),
       }),
       execute: async ({ title, subtitle, seconds, style }) => motion.render({ title, subtitle, seconds, style }),
+    }),
+  };
+}
+
+function workflowTool(workflows: WorkflowStore): ToolSet {
+  return {
+    save_workflow: tool({
+      description:
+        '把刚才实际做过的一套工具步骤保存成一个 VidRoom 工作流(SKILL.md)。用户说以后都这么做、保存这个流程时使用。',
+      inputSchema: SaveWorkflowInputSchema,
+      execute: async (input) => workflows.saveWorkflow(input),
     }),
   };
 }
@@ -151,12 +168,14 @@ export function createTools(deps: AgentDeps = {}): ToolSet {
   });
   const edit = deps.editor ? editTools(deps.editor) : {};
   const motion = deps.motion ? motionTool(deps.motion) : {};
+  const workflows = deps.workflows ? workflowTool(deps.workflows) : {};
   const video = deps.video;
-  if (!video) return { probe_gpu, ...edit, ...motion };
+  if (!video) return { probe_gpu, ...edit, ...motion, ...workflows };
   return {
     probe_gpu,
     ...edit,
     ...motion,
+    ...workflows,
     generate_video: tool({
       description:
         '用本地的 MiniMax H3 模型生成一条带声音的短视频(文生视频),完成后自动放进作品库。' +

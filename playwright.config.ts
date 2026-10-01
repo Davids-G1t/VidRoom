@@ -22,5 +22,7 @@ export default defineConfig({
     { name: 'abuse', testMatch: /abuse\.spec\.ts/ },
     // 代码渲染(HyperFrames)全链路:假 LLM 回放 + 真浏览器下载与渲染 + 真 ffmpeg。不需要显卡,本机与 CI 都跑
     { name: 'motion', testMatch: /motion\.spec\.ts/ },
+    // 工作流库:假 LLM + 假 ComfyUI 回放,真浏览器点默认/自定义工作流;本机跑
+    { name: 'workflow', testMatch: /workflow\.spec\.ts/ },
   ],
 });

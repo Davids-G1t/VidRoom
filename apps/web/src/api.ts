@@ -155,6 +155,60 @@ export async function fetchVideos(): Promise<VideoRecord[]> {
 }
 export const videoFileUrl = (id: string) => `/api/videos/${encodeURIComponent(id)}/file`;
 
+// ---- 工作流库 ----
+export interface WorkflowSummary {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  builtin: boolean;
+  steps: number;
+  updatedAt: string | null;
+}
+
+export type WorkflowJob =
+  | { state: 'idle' }
+  | { state: 'running'; workflowId: string; topic: string; steps: Array<{ id: string; tool: string; state: string; note?: string }> }
+  | { state: 'done'; workflowId: string; topic: string; steps: Array<{ id: string; tool: string; state: string; note?: string }>; video?: VideoRecord }
+  | { state: 'error'; workflowId: string; topic: string; steps: Array<{ id: string; tool: string; state: string; note?: string }>; error: string };
+
+export async function fetchWorkflows(): Promise<WorkflowSummary[]> {
+  const body = await getJson<{ workflows: WorkflowSummary[] }>('/api/workflows');
+  return Array.isArray(body?.workflows) ? body.workflows : [];
+}
+
+export async function fetchWorkflowSource(id: string): Promise<string | null> {
+  const body = await getJson<{ source: string }>(`/api/workflows/${encodeURIComponent(id)}/source`);
+  return typeof body?.source === 'string' ? body.source : null;
+}
+
+export async function saveWorkflowSource(id: string, source: string): Promise<{ ok: true; workflow: WorkflowSummary } | { ok: false; message: string }> {
+  try {
+    const res = await fetch(`/api/workflows/${encodeURIComponent(id)}/source`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source }) });
+    const body = await res.json();
+    if (!res.ok) return { ok: false, message: body.message ?? `保存失败(${res.status})` };
+    return { ok: true, workflow: body.workflow };
+  } catch {
+    return { ok: false, message: '连不上 VidRoom Host。' };
+  }
+}
+
+export async function runWorkflow(id: string, topic: string): Promise<{ ok: true; job: WorkflowJob } | { ok: false; message: string }> {
+  try {
+    const res = await fetch(`/api/workflows/${encodeURIComponent(id)}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ topic }) });
+    const body = await res.json();
+    if (!res.ok) return { ok: false, message: body.message ?? `运行失败(${res.status})` };
+    return { ok: true, job: body as WorkflowJob };
+  } catch {
+    return { ok: false, message: '连不上 VidRoom Host。' };
+  }
+}
+
+export async function fetchWorkflowJob(): Promise<WorkflowJob | null> {
+  const body = await getJson<WorkflowJob>('/api/workflows/job');
+  return body && typeof body.state === 'string' ? body : null;
+}
+
 /** 许可原文随聊天页一起分发(public/licenses/) */
 export async function fetchText(path: string): Promise<string | null> {
   try {

@@ -1,11 +1,25 @@
+import { createAnthropic } from '@ai-sdk/anthropic';
 import { createDeepSeek } from '@ai-sdk/deepseek';
 import { generateText, isStepCount, tool, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import type { VideoEditor } from './ffmpeg/editor.js';
 import { probeGpu, type RunNvidiaSmi } from './gpu.js';
 import { MAX_SECONDS, PROMPT_MAX_WORDS, PROMPT_MIN_WORDS, type VideoService } from './h3/service.js';
+import type { LlmProvider } from './llm-provider.js';
+import type { MotionService } from './motion/service.js';
+import {
+  MOTION_MAX_SECONDS,
+  MOTION_MIN_SECONDS,
+  MOTION_STYLES,
+  STYLE_LABELS,
+  SUBTITLE_MAX_CHARS,
+  TITLE_MAX_CHARS,
+} from './motion/storyboard.js';
 
 export const DEEPSEEK_MODEL = 'deepseek-v4-flash';
+export const ANTHROPIC_MODEL = 'claude-opus-5-5';
+export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1';
+
 
 export const SYSTEM_PROMPT = [
   '你是 VidRoom 的助手。VidRoom 在用户自己的 NVIDIA 显卡上用 ComfyUI 本地生成视频。',
@@ -39,6 +53,12 @@ export const SYSTEM_PROMPT = [
   '一句话里有多步(比如「剪成前 2 秒再加字幕」)就按顺序调用,后一步用前一步返回的新 id。',
   '时间都用秒;「前 2 秒」就是 start=0、end=2。字幕是烧进画面的文字,不是可开关的字幕轨。',
   '工具返回 ok=false 时把 reason 如实转告;成功后告诉用户新视频的时长,以及 note 里提到的注意事项。',
+  '\n\n【代码渲染】开场动画、标题卡、片头片尾这类以文字为主的动效,调用 render_motion 工具:它用代码(HyperFrames)渲染,',
+  '不用 AI 模型、不占显卡,也不受上面 MiniMax H3 许可的限制。从用户的话里取出标题(title)和可选的副标题(subtitle),',
+  `时长用 seconds(${MOTION_MIN_SECONDS}–${MOTION_MAX_SECONDS} 秒,用户没说就用 10),`,
+  `风格用 style:${MOTION_STYLES.map((s) => `${s}=${STYLE_LABELS[s]}`).join(',')};用户没指定就用 gradient。`,
+  '工具会自己拆分镜、渲染、做交付前自检(时长、冻帧、联系表),再放进作品库。',
+  '成功后告诉用户:这条是代码渲染的(不是 AI 生成)、风格、时长和分镜;ok=false 时如实转告 reason。',
 ].join('');
 
 export interface ChatMessage {
@@ -64,6 +84,25 @@ export interface AgentDeps {
   video?: VideoService;
   /** 不给就没有剪辑工具(list_videos / trim_video / concat_videos / add_subtitle) */
   editor?: VideoEditor;
+  /** 不给就没有 render_motion 工具 */
+  motion?: MotionService;
+}
+
+function motionTool(motion: MotionService): ToolSet {
+  return {
+    render_motion: tool({
+      description:
+        '用代码(HyperFrames + 无头浏览器逐帧截图 + ffmpeg)渲染一条文字动效视频,比如开场动画、标题卡。' +
+        '不用 AI 模型、不占显卡。先按标题/副标题/时长拆分镜,渲染后做交付前自检,通过才放进作品库。一次只跑一条。',
+      inputSchema: z.object({
+        title: z.string().min(1).max(TITLE_MAX_CHARS).describe(`标题,最多 ${TITLE_MAX_CHARS} 个字`),
+        subtitle: z.string().max(SUBTITLE_MAX_CHARS).optional().describe('副标题,可选'),
+        seconds: z.number().describe(`时长,秒,${MOTION_MIN_SECONDS}–${MOTION_MAX_SECONDS};用户没说就用 10`),
+        style: z.enum(MOTION_STYLES).default('gradient').describe(MOTION_STYLES.map((s) => `${s}=${STYLE_LABELS[s]}`).join(';')),
+      }),
+      execute: async ({ title, subtitle, seconds, style }) => motion.render({ title, subtitle, seconds, style }),
+    }),
+  };
 }
 
 function editTools(editor: VideoEditor): ToolSet {
@@ -111,11 +150,13 @@ export function createTools(deps: AgentDeps = {}): ToolSet {
     execute: async () => probeGpu(deps.runNvidiaSmi),
   });
   const edit = deps.editor ? editTools(deps.editor) : {};
+  const motion = deps.motion ? motionTool(deps.motion) : {};
   const video = deps.video;
-  if (!video) return { probe_gpu, ...edit };
+  if (!video) return { probe_gpu, ...edit, ...motion };
   return {
     probe_gpu,
     ...edit,
+    ...motion,
     generate_video: tool({
       description:
         '用本地的 MiniMax H3 模型生成一条带声音的短视频(文生视频),完成后自动放进作品库。' +
@@ -134,6 +175,18 @@ export function createTools(deps: AgentDeps = {}): ToolSet {
 /** baseURL 只给测试接假 LLM 服务用;不给就是 DeepSeek 官方地址 */
 export function createDeepSeekModel(apiKey: string, baseURL?: string): LanguageModel {
   return createDeepSeek({ apiKey, baseURL })(DEEPSEEK_MODEL);
+}
+
+/**
+ * baseURL 只给测试接假 Anthropic 服务用。不给时**显式**写官方地址:@ai-sdk/anthropic 在 baseURL 为空时会去读
+ * 环境变量 ANTHROPIC_BASE_URL,不能让继承来的环境变量把带 key 的请求改道。
+ */
+export function createAnthropicModel(apiKey: string, baseURL?: string): LanguageModel {
+  return createAnthropic({ apiKey, baseURL: baseURL || ANTHROPIC_API_URL })(ANTHROPIC_MODEL);
+}
+
+export function createModel(provider: LlmProvider, apiKey: string, baseURL?: string): LanguageModel {
+  return provider === 'anthropic' ? createAnthropicModel(apiKey, baseURL) : createDeepSeekModel(apiKey, baseURL);
 }
 
 export async function runChat(model: LanguageModel, messages: ChatMessage[], deps: AgentDeps = {}): Promise<ChatReply> {

@@ -13,7 +13,7 @@ VidRoom **不自己写生成引擎**。真正的视频/图像生成全部跑在 
 
 ## 许可
 
-主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。剪辑用的 ffmpeg 是首次使用时从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载的 **LGPL** 构建(不带 GPL 的 libx264,H.264 编码用 BSD 许可的 OpenH264),作为独立可执行文件调用,不链接进主程序。**注意**:思科(Cisco)对 OpenH264 的专利授权只覆盖思科自己分发的二进制([openh264.org FAQ](https://www.openh264.org/faq.html)),这份构建是从源码编译的,不带这项专利授权——这不影响它"不是 GPL"的结论,但涉及 H.264 专利的商业使用要自行评估。
+主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。剪辑用的 ffmpeg 是首次使用时从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载的 **LGPL** 构建(不带 GPL 的 libx264,H.264 编码用 BSD 许可的 OpenH264),作为独立可执行文件调用,不链接进主程序。**注意**:思科(Cisco)对 OpenH264 的专利授权只覆盖思科自己分发的二进制([openh264.org FAQ](https://www.openh264.org/faq.html)),这份构建是从源码编译的,不带这项专利授权——这不影响它"不是 GPL"的结论,但涉及 H.264 专利的商业使用要自行评估。代码渲染用的 [HyperFrames](https://github.com/heygen-com/hyperframes) 是 Apache-2.0,随安装包分发;它用的浏览器 chrome-headless-shell(Google 用 Chromium 构建的 Chrome for Testing)不随包分发,首次使用时从 Google 下载。来源、许可与核实过程见 [docs/third-party.md](docs/third-party.md)。
 
 ## 状态
 
@@ -33,11 +33,15 @@ pnpm test:e2e               # Playwright:不给 key 的页面行为(CI 也跑)
 pnpm test:e2e:gpu           # Playwright:真显卡 + 真 DeepSeek key,只在开发机跑
 pnpm test:e2e:desktop       # Playwright 驱动桌面版:假 key + 假 LLM 服务(CI 上驱动静默安装好的 exe)
 pnpm test:e2e:comfyui       # Playwright:「启动 / 打开 ComfyUI」,默认假 ComfyUI;设了 VIDROOM_COMFYUI_DIR 就用真的
+pnpm hyperframes:install    # 装锁定版本的 HyperFrames CLI(代码渲染视频用;npm ci,按锁文件)
+pnpm test:e2e:motion        # Playwright:代码渲染全链路(假 LLM 回放 + 真浏览器下载与渲染),CI 也跑
+pnpm motion:render -- --title VidRoom --seconds 10 --style gradient   # 不经 LLM 直接渲染一条
+pnpm motion:verify -- <视频.mp4> --seconds 10                           # 交付前自检单独跑
 pnpm comfyui:smoke          # 真 ComfyUI 起停冒烟(参数见 apps/host/scripts/comfyui-smoke.ts)
 pnpm dist:win               # 打 Windows 安装包 VidRoom-Setup-<版本>.exe(CI 在 windows-latest 上打)
 ```
 
-- 聊天 LLM 第一期走云端 DeepSeek(BYOK)。桌面版在设置页填 key;命令行起 Host 时 key **只从文件读**:环境变量 `VIDROOM_DEEPSEEK_KEY_FILE` 给出文件路径;不设或文件不存在时聊天不可用,页面提示去设置。
+- 聊天 LLM 走云端(BYOK):默认 DeepSeek,可选 Anthropic(模型 `claude-opus-5-5`)。两家走同一套工具。桌面版在设置页选用哪家、给它填 key;命令行起 Host 时 key **只从文件读**:`VIDROOM_LLM_PROVIDER` 选 `deepseek`(默认)或 `anthropic`,key 文件路径分别由 `VIDROOM_DEEPSEEK_KEY_FILE` / `VIDROOM_ANTHROPIC_KEY_FILE` 给出;不设或文件不存在时聊天不可用,页面提示去设置。
 - 鉴权:Host 启动时打印 `http://127.0.0.1:<端口>/launch?token=<一次性 token>`;打开后换成 HttpOnly 的 session cookie,token 立即作废。所有 `/api/*` 都要这个 cookie,否则 401。
 - 显卡探测:agent 工具 `probe_gpu` 跑 `nvidia-smi`,按显存分档 —— 没有 NVIDIA 显卡 `none`;< 15 GiB `unsupported`;15–24 GiB `experimental`(MiniMax H3 可用、默认关);≥ 24 GiB `default`。显存按整 GiB 四舍五入后比较(标称 24GB 的卡实报常略少于 24576 MiB)。
 - 端口默认随机,可用 `VIDROOM_PORT` 固定。
@@ -64,9 +68,18 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - 剪切:起点在关键帧上就 `-c copy` 流复制;不在就用 libopenh264 重新编码,剪得准但慢。拼接:各段编码参数一致用 concat demuxer 流复制,不一致用 concat 滤镜统一成第一段的尺寸/帧率后重新编码(没声音的段补静音)。加字幕:`drawtext` 烧进画面,libopenh264 重新编码;字体按平台找带中文字形的系统字体(Windows 微软雅黑/黑体/宋体,Linux Noto CJK/文泉驿),`VIDROOM_SUBTITLE_FONT` 可指定。
 - 测试素材由 ffmpeg 的 `color`/`testsrc`/`sine` 现做(几百 KB),放 `apps/host/.test-tmp/`(`VIDROOM_TEST_TMP` 可改),不用系统临时目录。
 
+代码渲染视频(`apps/host/src/motion/`,不用 AI 模型、不占显卡):
+- agent 工具 `render_motion`:开场动画、标题卡这类文字动效。流程是「分镜 → 构建 → 渲染 → 编码 → 自检 → 入库」:按标题/副标题/时长拆镜头(标题出现 → 停留 → 标题淡出),按风格包写成一份 [HyperFrames](https://github.com/heygen-com/hyperframes)(Apache-2.0)合成(HTML + CSS 关键帧),HyperFrames CLI 用无头浏览器逐帧截图成 PNG,再用上面那份 LGPL ffmpeg(libopenh264)编成 MP4。
+- 两个风格包:`minimal` 简约文字卡片(米白底、深色字、下划线展开、底部进度线)、`gradient` 动态渐变背景(深色底上三团彩色光斑漂移、标题从模糊放大到清晰)。1280×720、30 fps、3–30 秒。
+- 交付前自检:MP4 探测(h264、尺寸、时长与要求差 ≤0.1 秒)、冻帧检测(逐帧 md5,连续 1 秒以上完全相同就判渲染卡住)、联系表(均匀抽 12 帧拼 4×3 一张 PNG,存在作品目录 `<数据目录>/library/<id>.contact.png`)。不通过就不入库,原因转告用户。
+- 浏览器:首次渲染时按 `motion/browser.ts` 的清单下载 Chrome for Testing 的 chrome-headless-shell(版本与 HyperFrames 自己锁的一致,大小与 sha256 写死),解压到 `<数据目录>/runtime/`;换镜像 `VIDROOM_BROWSER_DOWNLOAD_URL`。来源、许可、为什么不复用 Electron 自带的 Chromium,见 [docs/third-party.md](docs/third-party.md)。
+- HyperFrames 的遥测、查新版本、自动升级一律关掉;它写的配置与临时文件都落在数据目录,不进用户家目录和系统临时目录。
+- 作品库里代码渲染的卡片标「代码渲染」,不标 AI 生成。
+
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。
 - Host 是主进程用 `ELECTRON_RUN_AS_NODE=1` fork 出来的子进程(复用 Electron 自带的 Node)。页面的 `/api` 请求由协议处理器带上 session cookie 转发给 Host,页面看不到启动地址和 cookie。
-- 设置页填的 DeepSeek key 用 Electron `safeStorage`(Windows 上走 DPAPI)加密,存到用户数据目录的 `deepseek-key.enc`;启动时主进程解密,经 fork 的 IPC 通道交给 Host,不进环境变量和命令行参数。页面只能「设置新 key」和「问有没有 key」,拿不到明文也拿不到密文。
+- 设置页填的 key 用 Electron `safeStorage`(Windows 上走 DPAPI)加密,每家一个文件(`deepseek-key.enc`、`anthropic-key.enc`),选用哪家记在 `llm-provider.json`;启动时主进程解密当前那家的 key,经 fork 的 IPC 通道交给 Host,不进环境变量和命令行参数。页面只能「给某家设置新 key」「切换用哪家」和「问有没有 key」,拿不到明文也拿不到密文。
+- 安装包带上 HyperFrames CLI 及其 node_modules(`resources/hyperframes`,打包前先 `pnpm hyperframes:install`),Host 以 `ELECTRON_RUN_AS_NODE=1` 的同一个可执行文件去跑它。
 - 关窗时有聊天请求在进行就先问;退出时连带结束 Host(Host 也会在父进程断开时自己退出)。
 - 安装包:未签名 NSIS,`oneClick: false`、`perMachine: false`,静默安装(`/S`)默认装进 `%LOCALAPPDATA%\Programs\VidRoom`,只写 HKCU。

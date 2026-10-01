@@ -4,7 +4,8 @@ import { ABUSE_REPORT_URL } from '../../web/src/api.js';
 import { handleAppRequest } from './app-protocol.js';
 import { comfyUrlFromStatus } from './comfy-url.js';
 import { HostProcess } from './host-process.js';
-import { KeyStore, normalizeKeyInput } from './key-store.js';
+import { LLM_PROVIDERS, isLlmProvider, type LlmProvider } from '../../host/src/llm-provider.js';
+import { KeyStore, loadProvider, normalizeKeyInput, saveProvider } from './key-store.js';
 import { IPC, type KeyStatus, type OpenComfyResult, type SetKeyResult } from './ipc-channels.js';
 import { APP_ENTRY_URL, APP_SCHEME, assertTrustedSender, isAppUrl } from './trust.js';
 
@@ -22,11 +23,17 @@ const resourcesDir = app.isPackaged ? process.resourcesPath : null;
 const hostScript = resourcesDir ? join(resourcesDir, 'host', 'host.mjs') : join(app.getAppPath(), 'dist', 'host', 'host.mjs');
 const webDir = resourcesDir ? join(resourcesDir, 'web') : join(app.getAppPath(), '..', 'web', 'dist');
 
-// 打包版 Host 被打成单文件、没有 node_modules:解压 ComfyUI 便携包用的 7za.exe 随安装包放在 resources/bin
-const hostEnv: Record<string, string> =
-  resourcesDir && process.platform === 'win32' ? { VIDROOM_7ZA: join(resourcesDir, 'bin', '7za.exe') } : {};
+// 打包版 Host 被打成单文件、没有 node_modules:解压 ComfyUI 便携包用的 7za.exe 随安装包放在 resources/bin;
+// 代码渲染用的 HyperFrames CLI(连同它的 node_modules)放在 resources/hyperframes
+const hostEnv: Record<string, string> = resourcesDir
+  ? {
+      VIDROOM_HYPERFRAMES_DIR: join(resourcesDir, 'hyperframes'),
+      ...(process.platform === 'win32' ? { VIDROOM_7ZA: join(resourcesDir, 'bin', '7za.exe') } : {}),
+    }
+  : {};
 const host = new HostProcess({ script: hostScript, webDir, env: hostEnv, log });
-let keyStore: KeyStore;
+let keyStores: Record<LlmProvider, KeyStore>;
+let userDataDir: string;
 
 /** 正在转发中的聊天请求数(出片在 generate_video 工具里跑,也算在聊天请求里) */
 let chatsInFlight = 0;
@@ -63,14 +70,29 @@ function encryptionUsable(): boolean {
 }
 
 function registerIpc(): void {
-  handleTrusted(IPC.keyStatus, (): KeyStatus => ({ configured: keyStore.has() }));
+  handleTrusted(IPC.keyStatus, (): KeyStatus => {
+    const provider = loadProvider(userDataDir);
+    const providers = Object.fromEntries(LLM_PROVIDERS.map((p) => [p, keyStores[p].has()])) as Record<LlmProvider, boolean>;
+    return { configured: providers[provider], provider, providers };
+  });
 
-  handleTrusted(IPC.setKey, async (_event, raw): Promise<SetKeyResult> => {
+  // 存某家的 key,并切换成用这家
+  handleTrusted(IPC.setKey, async (_event, raw, rawProvider): Promise<SetKeyResult> => {
+    if (!isLlmProvider(rawProvider)) return { ok: false, message: '不认识的 LLM 提供方。' };
     const key = normalizeKeyInput(raw);
     if (key === null) return { ok: false, message: 'key 格式不对:不能为空,不能含空格或换行。' };
     if (!encryptionUsable()) return { ok: false, message: '本机系统加密存储不可用,不能安全保存 key。' };
-    keyStore.save(key);
-    await host.setKey(key);
+    keyStores[rawProvider].save(key);
+    saveProvider(userDataDir, rawProvider);
+    await host.setKey(rawProvider, key);
+    return { ok: true };
+  });
+
+  // 切换用哪家:这家有 key 就交给 Host,没有就当没配置
+  handleTrusted(IPC.setProvider, async (_event, rawProvider): Promise<SetKeyResult> => {
+    if (!isLlmProvider(rawProvider)) return { ok: false, message: '不认识的 LLM 提供方。' };
+    saveProvider(userDataDir, rawProvider);
+    await host.setKey(rawProvider, keyStores[rawProvider].load());
     return { ok: true };
   });
 
@@ -179,10 +201,12 @@ process.on('exit', () => host.kill());
 app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 
-  keyStore = new KeyStore(app.getPath('userData'), {
-    encrypt: (plain) => safeStorage.encryptString(plain),
-    decrypt: (data) => safeStorage.decryptString(data),
-  });
+  userDataDir = app.getPath('userData');
+  const cipher = {
+    encrypt: (plain: string) => safeStorage.encryptString(plain),
+    decrypt: (data: Buffer) => safeStorage.decryptString(data),
+  };
+  keyStores = Object.fromEntries(LLM_PROVIDERS.map((p) => [p, new KeyStore(userDataDir, cipher, log, p)])) as Record<LlmProvider, KeyStore>;
 
   protocol.handle(APP_SCHEME, (request) =>
     handleAppRequest(request, {
@@ -201,7 +225,8 @@ app.whenReady().then(async () => {
 
   registerIpc();
   setupMenu();
-  await host.start(keyStore.load());
+  const provider = loadProvider(userDataDir);
+  await host.start(provider, keyStores[provider].load());
   createWindow();
 }).catch((err) => {
   console.error('[vidroom-desktop] 启动失败:', err instanceof Error ? err.message : String(err));

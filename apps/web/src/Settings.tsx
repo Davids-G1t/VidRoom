@@ -1,20 +1,44 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { desktopApi } from './desktop';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { desktopApi, type LlmProvider } from './desktop';
+
+const PROVIDERS: Array<{ id: LlmProvider; label: string; note: string }> = [
+  { id: 'deepseek', label: 'DeepSeek', note: '默认' },
+  { id: 'anthropic', label: 'Anthropic', note: 'Claude,可选' },
+];
+const labelOf = (p: LlmProvider) => PROVIDERS.find((x) => x.id === p)!.label;
 
 /**
- * 设置页:填 DeepSeek key。key 交给桌面版主进程加密保存,页面之后再也拿不回来,
- * 只能知道「有没有配置」。浏览器里打开(命令行开发)时没有这个能力。
+ * 设置页:选用哪家 LLM(DeepSeek 或 Anthropic),给它填 key。key 交给桌面版主进程加密保存,
+ * 页面之后再也拿不回来,只能知道「有没有配置」。浏览器里打开(命令行开发)时没有这个能力。
  */
 export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: () => void }) {
   const api = desktopApi();
-  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [provider, setProvider] = useState<LlmProvider>('deepseek');
+  const [providers, setProviders] = useState<Record<LlmProvider, boolean> | null>(null);
   const [key, setKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    api?.getKeyStatus().then((s) => setConfigured(s.configured));
+  const refresh = useCallback(async () => {
+    const s = await api?.getKeyStatus();
+    if (!s) return;
+    setProvider(s.provider);
+    setProviders(s.providers);
   }, [api]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function choose(next: LlmProvider) {
+    if (!api || next === provider || saving) return;
+    setMessage(null);
+    setProvider(next);
+    const result = await api.setProvider(next);
+    if (!result.ok) setMessage(result.message);
+    await refresh();
+    onSaved();
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -22,11 +46,11 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
     setSaving(true);
     setMessage(null);
     try {
-      const result = await api.setKey(key);
+      const result = await api.setKey(key, provider);
       if (result.ok) {
         setKey('');
-        setConfigured(true);
         setMessage('已保存。');
+        await refresh();
         onSaved();
       } else {
         setMessage(result.message);
@@ -38,15 +62,28 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
     }
   }
 
+  const configured = providers ? providers[provider] : null;
   return (
     <section className="settings" data-testid="settings" aria-label="设置">
       <h2>设置</h2>
       {!api ? (
-        <p>设置页只在桌面版里可用。命令行开发时用环境变量 VIDROOM_DEEPSEEK_KEY_FILE 指定 key 文件。</p>
+        <p>
+          设置页只在桌面版里可用。命令行开发时用环境变量 VIDROOM_DEEPSEEK_KEY_FILE(或 VIDROOM_LLM_PROVIDER=anthropic 加
+          VIDROOM_ANTHROPIC_KEY_FILE)指定 key 文件。
+        </p>
       ) : (
         <form onSubmit={onSubmit}>
+          <fieldset>
+            <legend>用哪家 LLM</legend>
+            {PROVIDERS.map((p) => (
+              <label key={p.id}>
+                <input type="radio" name="llm-provider" value={p.id} checked={provider === p.id} onChange={() => void choose(p.id)} />
+                {p.label}({p.note})
+              </label>
+            ))}
+          </fieldset>
           <p data-testid="key-status">
-            DeepSeek API key:{configured === null ? '…' : configured ? '已配置' : '未配置'}
+            {labelOf(provider)} API key:{configured === null ? '…' : configured ? '已配置' : '未配置'}
           </p>
           <label>
             {configured ? '换一个新的 key' : '填入 key'}
@@ -54,7 +91,7 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
               type="password"
               autoComplete="off"
               spellCheck={false}
-              aria-label="DeepSeek API key"
+              aria-label={`${labelOf(provider)} API key`}
               value={key}
               onChange={(e) => setKey(e.target.value)}
             />

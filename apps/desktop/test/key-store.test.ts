@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { KEY_FILE_NAME, KeyStore, MAX_KEY_LENGTH, normalizeKeyInput, type Cipher } from '../src/key-store.js';
+import { KEY_FILE_NAME, KEY_FILE_NAMES, KeyStore, MAX_KEY_LENGTH, PROVIDER_FILE_NAME, loadProvider, normalizeKeyInput, saveProvider, type Cipher } from '../src/key-store.js';
 
 // 假加密:每个字节异或 0x5a。真加密(safeStorage / DPAPI)只能在 Windows CI 的 e2e 里验
 const fakeCipher: Cipher = {
@@ -48,5 +48,25 @@ describe('KeyStore', () => {
     expect(store.load()).toBeNull();
     expect(log).toHaveBeenCalledTimes(1);
     expect(log.mock.calls[0][0]).not.toContain('garbage-content');
+  });
+});
+
+describe('多家 key 与当前选择', () => {
+  it('DeepSeek 与 Anthropic 各存各的文件,互不覆盖', () => {
+    const dir = tempDir();
+    new KeyStore(dir, fakeCipher, undefined, 'deepseek').save('sk-deepseek');
+    new KeyStore(dir, fakeCipher, undefined, 'anthropic').save('sk-ant-key');
+    expect(readdirSync(dir).sort()).toEqual([KEY_FILE_NAMES.anthropic, KEY_FILE_NAMES.deepseek].sort());
+    expect(new KeyStore(dir, fakeCipher, undefined, 'deepseek').load()).toBe('sk-deepseek');
+    expect(new KeyStore(dir, fakeCipher, undefined, 'anthropic').load()).toBe('sk-ant-key');
+  });
+
+  it('当前选择:默认 deepseek;存了 anthropic 读回 anthropic;文件坏了回到默认', () => {
+    const dir = tempDir();
+    expect(loadProvider(dir)).toBe('deepseek');
+    saveProvider(dir, 'anthropic');
+    expect(loadProvider(dir)).toBe('anthropic');
+    writeFileSync(join(dir, PROVIDER_FILE_NAME), '{"provider":"openai"}');
+    expect(loadProvider(dir)).toBe('deepseek');
   });
 });

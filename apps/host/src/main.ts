@@ -1,7 +1,8 @@
 import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createDeepSeekModel } from './agent.js';
+import { createModel } from './agent.js';
+import { PROVIDER_LABELS, type LlmProvider } from './llm-provider.js';
 import { dataDir } from './comfyui/install.js';
 import { ComfyManager, defaultMemoryLimitMiB, parseExtraArgs } from './comfyui/manager.js';
 import { VideoEditor } from './ffmpeg/editor.js';
@@ -11,13 +12,14 @@ import { ConsentStore } from './h3/license.js';
 import { VideoLibrary } from './h3/library.js';
 import { ModelStore, h3ModelFiles, modelsDir, writeExtraModelPaths } from './h3/models.js';
 import { VideoService } from './h3/service.js';
-import { KEY_FILE_ENV, loadDeepSeekKey } from './key.js';
+import { BASE_URL_ENVS, KEY_FILE_ENVS, loadKey, providerFromEnv } from './key.js';
+import { ensureBrowser } from './motion/browser.js';
+import { MotionService } from './motion/service.js';
 import { parseParentMessage, type HostToParent } from './parent-ipc.js';
 import { startHost } from './server.js';
 
 const webDir = process.env.VIDROOM_WEB_DIR ?? fileURLToPath(new URL('../../web/dist', import.meta.url));
 const port = Number(process.env.VIDROOM_PORT ?? 0);
-const baseURL = process.env.VIDROOM_DEEPSEEK_BASE_URL || undefined;
 
 // ComfyUI 只在用户点「启动 ComfyUI」或第一次出片时才找/下载/起;VIDROOM_COMFYUI_ARGS 给它加参数(如 --cpu)。
 // 模型目录和 ComfyUI 本体分开放,经 --extra-model-paths-config 告诉 ComfyUI 去哪找权重。
@@ -45,13 +47,25 @@ const editor = new VideoEditor({
   log: (m) => console.log(m),
 });
 
-const modelFor = (apiKey: string | null) => (apiKey ? createDeepSeekModel(apiKey, baseURL) : null);
+// 代码渲染(HyperFrames):不占显卡;chrome-headless-shell 与 ffmpeg 都在第一次渲染时按清单下载
+const motion = new MotionService({
+  library,
+  ffmpeg: () => ensureFfmpeg({ root: data, log: (m) => console.log(m) }),
+  browser: () => ensureBrowser({ root: data, log: (m) => console.log(m) }),
+  workDir: join(data, 'cache', 'motion'),
+  homeDir: join(data, 'runtime', 'hyperframes-home'),
+  log: (m) => console.log(m),
+});
+
+const modelFor = (provider: LlmProvider, apiKey: string | null) =>
+  apiKey ? createModel(provider, apiKey, process.env[BASE_URL_ENVS[provider]] || undefined) : null;
 
 /**
  * 两种起法:
  * - 桌面壳用 child_process.fork() 起(有 IPC 通道):key 只从 IPC 通道收,不读文件、不读环境变量;
  *   启动地址也只从 IPC 回给壳,不打印。父进程断开(壳退出或崩溃)就跟着退出,不留孤儿。
- * - 命令行起(开发用):key 从 VIDROOM_DEEPSEEK_KEY_FILE 指向的文件读,启动地址打印到控制台。
+ * - 命令行起(开发用):VIDROOM_LLM_PROVIDER 选 deepseek(默认)或 anthropic,key 从对应的
+ *   VIDROOM_DEEPSEEK_KEY_FILE / VIDROOM_ANTHROPIC_KEY_FILE 指向的文件读,启动地址打印到控制台。
  */
 if (process.send) {
   const send = (msg: HostToParent) => process.send!(msg);
@@ -66,10 +80,10 @@ if (process.send) {
     const secrets = msg.apiKey ? [msg.apiKey] : [];
     if (host === null) {
       // 第一条 set-key 到了才起服务,页面第一次查状态时 key 已就位
-      host = await startHost({ model: modelFor(msg.apiKey), webDir, port, secrets, comfy, video, editor });
+      host = await startHost({ model: modelFor(msg.provider, msg.apiKey), webDir, port, secrets, comfy, video, editor, motion });
       send({ type: 'ready', launchUrl: host.launchUrl });
     } else {
-      host.setModel(modelFor(msg.apiKey), secrets);
+      host.setModel(modelFor(msg.provider, msg.apiKey), secrets);
     }
     send({ type: 'key-applied', hasApiKey: msg.apiKey !== null });
   };
@@ -93,11 +107,12 @@ if (process.send) {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 } else {
-  const apiKey = loadDeepSeekKey();
-  const host = await startHost({ model: modelFor(apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video, editor });
+  const provider = providerFromEnv();
+  const apiKey = loadKey(provider);
+  const host = await startHost({ model: modelFor(provider, apiKey), webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video, editor, motion });
 
   if (!apiKey) {
-    console.log(`[vidroom] 没有配置 DeepSeek API key(环境变量 ${KEY_FILE_ENV} 未设置或文件不存在),聊天功能不可用。`);
+    console.log(`[vidroom] 没有配置 ${PROVIDER_LABELS[provider]} API key(环境变量 ${KEY_FILE_ENVS[provider]} 未设置或文件不存在),聊天功能不可用。`);
   }
   console.log(`[vidroom] 启动地址(只能用一次): ${host.launchUrl}`);
 

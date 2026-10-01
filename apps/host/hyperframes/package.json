@@ -1,0 +1,9 @@
+{
+  "name": "vidroom-hyperframes-runtime",
+  "private": true,
+  "description": "HyperFrames CLI (Apache-2.0), pinned for VidRoom code-rendered video. See docs/third-party.md",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "hyperframes": "0.8.98"
+  }
+}

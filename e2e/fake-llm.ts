@@ -7,6 +7,8 @@ import { CAT_PROMPT } from '../apps/host/test/fixtures/h3-prompts';
  * - 第一轮让 agent 调 probe_gpu;带着工具结果的第二轮把结果里的 summary 原样说出来;
  * - 用户消息里带「视频」或「橘猫」:第一轮调 generate_video(固定的 180–260 词英文提示词、5 秒),
  *   第二轮按工具结果说「已生成」或转述失败原因;
+ * - 用户消息里带「开场动画」:第一轮调 render_motion(录好的固定分镜参数:标题 VidRoom、10 秒、gradient),
+ *   第二轮按工具结果说「已渲染」或转述失败原因;
  * - 用户消息以「慢」字开头就先挂住,直到测试调 release(),用来模拟「有任务在跑」;
  * - 记下每个请求的 Authorization 头,用来核对 Host 拿到的正是设置页存进去的 key。
  */
@@ -21,6 +23,18 @@ export interface FakeLlm {
 
 interface ChatBody {
   messages: Array<{ role: string; content?: string | null }>;
+}
+
+/** 录好的「做一条10秒的开场动画,标题是VidRoom」的工具调用参数 */
+export const MOTION_CALL = { title: 'VidRoom', seconds: 10, style: 'gradient' };
+
+function motionReply(toolContent: string): string {
+  try {
+    const r = JSON.parse(toolContent);
+    return r.ok ? `已用代码渲染了一条 ${r.video.seconds} 秒的开场动画,放进作品库了。` : `没能渲染:${r.reason}`;
+  } catch {
+    return toolContent;
+  }
 }
 
 function videoReply(toolContent: string): string {
@@ -70,6 +84,16 @@ export async function startFakeLlm(): Promise<FakeLlm> {
     if (lastUser?.content?.startsWith('慢')) {
       await new Promise<void>((resolve) => waiting.push(resolve));
       reply = completion({ content: '慢任务做完了。' }, 'stop');
+    } else if (/开场动画/.test(lastUser?.content ?? '')) {
+      reply = tool
+        ? completion({ content: motionReply(String(tool.content ?? '')) }, 'stop')
+        : completion(
+            {
+              content: null,
+              tool_calls: [{ id: 'call_m1', type: 'function', function: { name: 'render_motion', arguments: JSON.stringify(MOTION_CALL) } }],
+            },
+            'tool_calls',
+          );
     } else if (/视频|橘猫/.test(lastUser?.content ?? '')) {
       reply = tool
         ? completion({ content: videoReply(String(tool.content ?? '')) }, 'stop')

@@ -16,6 +16,13 @@ extraResources:
     to: host
   - from: ../web/dist
     to: web
+  # 代码渲染用的 HyperFrames CLI(Apache-2.0)连同它的 node_modules;先跑 `pnpm hyperframes:install`(npm ci,按锁文件)。
+  # from 必须是上一级:electron-builder 复制时一律跳过「from 目录下第一层的 node_modules」,指到 hyperframes 目录本身会漏掉依赖
+  - from: ../host
+    to: .
+    filter:
+      - hyperframes/package.json
+      - hyperframes/node_modules/**/*
 npmRebuild: false
 win:
   target:

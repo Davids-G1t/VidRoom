@@ -21,7 +21,11 @@
     "desktop": "pnpm build && pnpm --filter @vidroom/desktop start",
     "dist:win": "pnpm build && pnpm --filter @vidroom/desktop dist --win",
     "comfyui:smoke": "pnpm --filter @vidroom/host comfyui:smoke",
-    "ffmpeg:fetch": "pnpm --filter @vidroom/host ffmpeg:fetch"
+    "ffmpeg:fetch": "pnpm --filter @vidroom/host ffmpeg:fetch",
+    "hyperframes:install": "npm ci --prefix apps/host/hyperframes --ignore-scripts --omit=dev --no-audit --no-fund",
+    "motion:render": "pnpm --filter @vidroom/host motion:render",
+    "motion:verify": "pnpm --filter @vidroom/host motion:verify",
+    "test:e2e:motion": "pnpm build && playwright test --project=motion"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

@@ -1,10 +1,11 @@
 import { fork, type ChildProcess } from 'node:child_process';
+import type { LlmProvider } from '../../host/src/llm-provider.js';
 import type { HostToParent, SetKeyMessage } from '../../host/src/parent-ipc.js';
 
 /**
  * Host 子进程:用 ELECTRON_RUN_AS_NODE=1 把 Electron 自己(process.execPath)当 Node 跑,
  * 不另带 Node 运行时。用 fork() 而不是 spawn():父子之间天然有一条 IPC 通道,
- * DeepSeek key 只走这条通道(不进环境变量、不进命令行参数)。
+ * API key 只走这条通道(不进环境变量、不进命令行参数)。
  *
  * 主进程拿到 Host 的一次性启动地址后自己去兑换 session cookie,页面的 /api 请求由
  * vidroom-app:// 协议处理器带上 cookie 转发给 Host —— 页面既看不到启动地址也看不到 cookie。
@@ -13,7 +14,7 @@ import type { HostToParent, SetKeyMessage } from '../../host/src/parent-ipc.js';
 const SESSION_COOKIE_RE = /(?:^|[;,]\s*)(vidroom_session=[0-9a-f]+)/;
 
 /**
- * `VIDROOM_DEEPSEEK_BASE_URL` 只在 e2e 测试里用来把 LLM 请求指向本机假服务(测试直接
+ * `VIDROOM_DEEPSEEK_BASE_URL` / `VIDROOM_ANTHROPIC_BASE_URL` 只在 e2e 测试里用来把 LLM 请求指向本机假服务(测试直接
  * 对打包产物设这个环境变量后启动,所以不能在"打包版"这个层面整个禁掉,否则测试基础设施
  * 也跟着断)。打包后的应用继承的是用户级环境变量(Windows 上改 HKCU\Environment 不需要
  * 管理员),不收紧的话,这个变量能把带着已解密 key 的请求指到任意地址。
@@ -25,7 +26,7 @@ const SESSION_COOKIE_RE = /(?:^|[;,]\s*)(vidroom_session=[0-9a-f]+)/;
  * 收成白名单、打包时关掉 --inspect / RunAsNode 这些 fuse——这些留作后续,这条只先挡住
  * "误配置"和"影响不到同一用户环境变量的外部攻击者"这两类,其余一律当作没设置。
  */
-export function sanitizeDeepSeekBaseURL(value: string | undefined): string | undefined {
+export function sanitizeTestBaseURL(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
     // new URL(...).hostname 对 IPv6 字面量返回带方括号的形式(如 "[::1]"),裸 "::1" 永远不会出现,不放行它。
@@ -58,7 +59,7 @@ export class HostProcess {
   }
 
   /** 起 Host 并交给它 key;等它监听好、主进程换到 cookie 才返回 */
-  async start(apiKey: string | null): Promise<void> {
+  async start(provider: LlmProvider, apiKey: string | null): Promise<void> {
     const log = this.opts.log ?? console.log;
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -68,12 +69,15 @@ export class HostProcess {
     };
     // Host 在 IPC 模式下本来就不读 key 文件;这里也不把开发用的 key 文件路径传下去
     delete env.VIDROOM_DEEPSEEK_KEY_FILE;
-    const safeBaseURL = sanitizeDeepSeekBaseURL(env.VIDROOM_DEEPSEEK_BASE_URL);
-    if (env.VIDROOM_DEEPSEEK_BASE_URL && !safeBaseURL) {
-      log(`[vidroom-desktop] 忽略 VIDROOM_DEEPSEEK_BASE_URL(不是回环地址):${env.VIDROOM_DEEPSEEK_BASE_URL}`);
+    delete env.VIDROOM_ANTHROPIC_KEY_FILE;
+    // @ai-sdk/anthropic 在没给 baseURL 时会读 ANTHROPIC_BASE_URL;Host 已显式传官方地址,这里再去掉一层
+    delete env.ANTHROPIC_BASE_URL;
+    for (const name of ['VIDROOM_DEEPSEEK_BASE_URL', 'VIDROOM_ANTHROPIC_BASE_URL']) {
+      const safeBaseURL = sanitizeTestBaseURL(env[name]);
+      if (env[name] && !safeBaseURL) log(`[vidroom-desktop] 忽略 ${name}(不是回环地址):${env[name]}`);
+      if (safeBaseURL) env[name] = safeBaseURL;
+      else delete env[name];
     }
-    if (safeBaseURL) env.VIDROOM_DEEPSEEK_BASE_URL = safeBaseURL;
-    else delete env.VIDROOM_DEEPSEEK_BASE_URL;
     const child = fork(this.opts.script, [], {
       execPath: process.execPath,
       env,
@@ -95,17 +99,17 @@ export class HostProcess {
 
     const ready = this.next();
     const applied = this.next();
-    this.send({ type: 'set-key', apiKey });
+    this.send({ type: 'set-key', provider, apiKey });
     const first = await ready;
     if (first.type !== 'ready') throw new Error(`Host 首条消息不是 ready:${first.type}`);
     await applied;
     await this.redeem(first.launchUrl);
   }
 
-  /** 把新 key 交给 Host,等它换好模型 */
-  async setKey(apiKey: string | null): Promise<void> {
+  /** 把选用的 LLM 和它的 key 交给 Host,等它换好模型 */
+  async setKey(provider: LlmProvider, apiKey: string | null): Promise<void> {
     const applied = this.next();
-    this.send({ type: 'set-key', apiKey });
+    this.send({ type: 'set-key', provider, apiKey });
     const msg = await applied;
     if (msg.type !== 'key-applied') throw new Error(`Host 回复不是 key-applied:${msg.type}`);
   }

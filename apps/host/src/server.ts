@@ -10,7 +10,9 @@ import { runChat, type ChatMessage } from './agent.js';
 import type { VideoEditor } from './ffmpeg/editor.js';
 import type { RunNvidiaSmi } from './gpu.js';
 import type { ComfyManager } from './comfyui/manager.js';
+import { publicVideo } from './h3/library.js';
 import type { VideoService } from './h3/service.js';
+import type { MotionService } from './motion/service.js';
 
 /** 写死只听本机回环地址 */
 export const LISTEN_HOST = '127.0.0.1';
@@ -32,6 +34,8 @@ export interface HostOptions {
   video?: VideoService;
   /** 剪辑服务;不给就没有剪辑工具 */
   editor?: VideoEditor;
+  /** 代码渲染服务;不给就没有 render_motion 工具 */
+  motion?: MotionService;
 }
 
 export interface Host {
@@ -147,11 +151,11 @@ export async function startHost(opts: HostOptions): Promise<Host> {
         return;
       }
       try {
-        const reply = await runChat(model, messages, { runNvidiaSmi: opts.runNvidiaSmi, video: opts.video, editor: opts.editor });
+        const reply = await runChat(model, messages, { runNvidiaSmi: opts.runNvidiaSmi, video: opts.video, editor: opts.editor, motion: opts.motion });
         sendJson(res, 200, reply);
       } catch (err) {
         console.error('[vidroom] 调用 LLM 失败:', redact(err instanceof Error ? err.message : String(err), secrets));
-        sendJson(res, 502, { error: 'llm_error', message: '调用 DeepSeek 失败,请稍后再试或检查 API key。' });
+        sendJson(res, 502, { error: 'llm_error', message: '调用 LLM 失败,请稍后再试或检查 API key。' });
       }
       return;
     }
@@ -279,7 +283,7 @@ async function handleVideoApi(video: VideoService, req: IncomingMessage, res: Se
     return true;
   }
   if (pathname === '/api/videos' && method === 'GET') {
-    sendJson(res, 200, (await video.library().list()).map(({ file: _f, ...pub }) => pub));
+    sendJson(res, 200, (await video.library().list()).map(publicVideo));
     return true;
   }
   const m = /^\/api\/videos\/([\w-]+)\/file$/.exec(pathname);

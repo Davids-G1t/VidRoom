@@ -55,6 +55,17 @@ const completion = (message: Record<string, unknown>, finishReason: string) => (
   usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
 });
 
+const workflowSteps = [
+  { id: 'script', tool: 'write_script', args: { shots: 3 } },
+  { id: 'shots', tool: 'generate_video', each: '{{script.shots}}', args: { prompt: '{{item.prompt}}', seconds: 3 } },
+  { id: 'joined', tool: 'concat_videos', args: { video_ids: '{{shots.ids}}' } },
+  { id: 'final', tool: 'add_subtitle', args: { video_id: '{{joined.id}}', text: '{{script.caption}}' } },
+];
+
+function workflowScript(): string {
+  return JSON.stringify({ caption: '橘猫的夜晚创作', shots: [{ prompt: CAT_PROMPT }, { prompt: CAT_PROMPT }, { prompt: CAT_PROMPT }] });
+}
+
 function summaryOf(toolContent: string): string {
   try {
     const parsed = JSON.parse(toolContent);
@@ -81,7 +92,28 @@ export async function startFakeLlm(): Promise<FakeLlm> {
     const tool = body.messages.find((m) => m.role === 'tool');
 
     let reply;
-    if (lastUser?.content?.startsWith('慢')) {
+    if (/分镜数:\s*3/.test(lastUser?.content ?? '')) {
+      reply = completion({ content: workflowScript() }, 'stop');
+    } else if (tool?.content && /save_workflow/.test(JSON.stringify(body.messages))) {
+      reply = completion({ content: '已保存到工作流库。' }, 'stop');
+    } else if (/以后都这么做|保存这个流程/.test(lastUser?.content ?? '')) {
+      reply = completion(
+        {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_save_workflow',
+              type: 'function',
+              function: {
+                name: 'save_workflow',
+                arguments: JSON.stringify({ name: 'custom-topic-video', title: '自定义主题成片', description: '测试保存的主题成片流程', steps: workflowSteps }),
+              },
+            },
+          ],
+        },
+        'tool_calls',
+      );
+    } else if (lastUser?.content?.startsWith('慢')) {
       await new Promise<void>((resolve) => waiting.push(resolve));
       reply = completion({ content: '慢任务做完了。' }, 'stop');
     } else if (/开场动画/.test(lastUser?.content ?? '')) {

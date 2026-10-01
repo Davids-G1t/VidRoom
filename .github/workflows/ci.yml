@@ -58,7 +58,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm exec playwright install chromium
 
-      # 不给 key 启动 Host,页面提示去设置、预设工作流入口可见
+      # 不给 key 启动 Host,页面提示去设置、工作流库入口可见
       - name: E2E (no key)
         run: pnpm test:e2e
 

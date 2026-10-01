@@ -17,12 +17,12 @@ import { desktopApi } from './desktop';
 import { H3Panel } from './H3Panel';
 import { Settings } from './Settings';
 import { VideoGallery } from './VideoGallery';
+import { WorkflowPanel } from './WorkflowPanel';
 
 interface Entry extends ChatMessage {
   toolCalls?: ToolCallRecord[];
 }
 
-const PRESET_WORKFLOWS = ['文字生成视频', '图片生成视频'];
 const NO_KEY_TEXT = '没有配置 API key,请去设置。';
 
 function describeJob(j: JobState | null): string {
@@ -137,16 +137,7 @@ export function App() {
         <Settings onSaved={() => fetchStatus().then(setStatus)} onClose={() => setSettingsOpen(false)} />
       )}
 
-      <section className="presets" data-testid="preset-workflows" aria-label="预设工作流">
-        <h2>预设工作流</h2>
-        <div className="preset-buttons">
-          {PRESET_WORKFLOWS.map((name) => (
-            <button key={name} type="button" onClick={() => setNotice(`「${name}」即将推出。`)}>
-              {name}
-            </button>
-          ))}
-        </div>
-      </section>
+      <WorkflowPanel onNotice={setNotice} onVideosChanged={() => fetchVideos().then(setVideos)} />
 
       <H3Panel />
 

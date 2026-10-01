@@ -4,8 +4,12 @@ import { App } from '../src/App';
 
 function mockFetch(routes: Record<string, { status: number; body: unknown }>) {
   const fn = vi.fn(async (url: string) => {
-    const r = routes[url];
-    return new Response(JSON.stringify(r.body), { status: r.status });
+    const defaults: Record<string, { status: number; body: unknown }> = {
+      '/api/workflows': { status: 200, body: { workflows: [{ id: 'topic-to-video', name: 'topic-to-video', title: '默认工作流', description: '一句主题成片', builtin: true, steps: 4, updatedAt: null }] } },
+      '/api/videos': { status: 200, body: [] },
+    };
+    const r = routes[url] ?? defaults[url];
+    return new Response(JSON.stringify(r?.body ?? { error: 'not mocked' }), { status: r?.status ?? 404 });
   });
   vi.stubGlobal('fetch', fn);
   return fn;
@@ -14,12 +18,12 @@ function mockFetch(routes: Record<string, { status: number; body: unknown }>) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('聊天页', () => {
-  it('没有 key:提示去设置,预设工作流入口仍可见,输入框禁用', async () => {
+  it('没有 key:提示去设置,工作流库入口仍可见,输入框禁用', async () => {
     mockFetch({ '/api/status': { status: 200, body: { hasApiKey: false } } });
     render(<App />);
     expect(await screen.findByTestId('no-key-notice')).toHaveTextContent('去设置');
-    expect(screen.getByTestId('preset-workflows')).toBeVisible();
-    expect(screen.getByRole('button', { name: '文字生成视频' })).toBeEnabled();
+    expect(await screen.findByTestId('workflow-library')).toBeVisible();
+    expect(screen.getByTestId('workflow-topic-to-video')).toHaveTextContent('默认工作流');
     expect(screen.getByLabelText('输入消息')).toBeDisabled();
   });
 
@@ -46,7 +50,11 @@ describe('聊天页', () => {
 
   it('桌面版设置页:存 key 后刷新状态、清空输入框,页面不显示 key', async () => {
     let hasKey = false;
-    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ hasApiKey: hasKey }), { status: 200 }));
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url === '/api/workflows') return new Response(JSON.stringify({ workflows: [] }), { status: 200 });
+      if (url === '/api/videos') return new Response(JSON.stringify([]), { status: 200 });
+      return new Response(JSON.stringify({ hasApiKey: hasKey }), { status: 200 });
+    });
     vi.stubGlobal('fetch', fetchFn);
     const setKey = vi.fn(async () => {
       hasKey = true;
@@ -71,7 +79,11 @@ describe('聊天页', () => {
   });
 
   it('桌面版设置页:切到 Anthropic 就调 setProvider,key 输入框和状态换成 Anthropic 的,存 key 带上 anthropic', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ hasApiKey: true }), { status: 200 })));
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/workflows') return new Response(JSON.stringify({ workflows: [] }), { status: 200 });
+      if (url === '/api/videos') return new Response(JSON.stringify([]), { status: 200 });
+      return new Response(JSON.stringify({ hasApiKey: true }), { status: 200 });
+    }));
     let provider: 'deepseek' | 'anthropic' = 'deepseek';
     const setProvider = vi.fn(async (p: 'deepseek' | 'anthropic') => {
       provider = p;
@@ -103,6 +115,6 @@ describe('聊天页', () => {
     mockFetch({ '/api/status': { status: 401, body: { error: 'unauthorized' } } });
     render(<App />);
     expect(await screen.findByTestId('unauthorized-notice')).toBeInTheDocument();
-    expect(screen.getByTestId('preset-workflows')).toBeVisible();
+    expect(await screen.findByTestId('workflow-library')).toBeVisible();
   });
 });

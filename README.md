@@ -35,6 +35,7 @@ pnpm test:e2e:desktop       # Playwright 驱动桌面版:假 key + 假 LLM 服�
 pnpm test:e2e:comfyui       # Playwright:「启动 / 打开 ComfyUI」,默认假 ComfyUI;设了 VIDROOM_COMFYUI_DIR 就用真的
 pnpm hyperframes:install    # 装锁定版本的 HyperFrames CLI(代码渲染视频用;npm ci,按锁文件)
 pnpm test:e2e:motion        # Playwright:代码渲染全链路(假 LLM 回放 + 真浏览器下载与渲染),CI 也跑
+pnpm test:e2e:workflow      # Playwright:工作流库(假 LLM + 假 ComfyUI 回放,真 UI 点击默认/自定义工作流)
 pnpm motion:render -- --title VidRoom --seconds 10 --style gradient   # 不经 LLM 直接渲染一条
 pnpm motion:verify -- <视频.mp4> --seconds 10                           # 交付前自检单独跑
 pnpm comfyui:smoke          # 真 ComfyUI 起停冒烟(参数见 apps/host/scripts/comfyui-smoke.ts)
@@ -61,6 +62,11 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - 许可义务:成片卡片、详情页、「关于」页标「MiniMax H3」,「关于」页附 NOTICE 原文;使用限制原样转达见 [docs/USE-POLICY.md](docs/USE-POLICY.md);滥用举报流程见 [docs/abuse.md](docs/abuse.md)(菜单「举报滥用」打开 issue 模板)。防滥用靠聊天 LLM 按系统提示词判断意图,不做关键词过滤。仓库里不放任何成片或截帧。
 - 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,不碰真实权重、不需要真显卡,测试自己起本机假镜像)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
 - 已知问题:权重下载走 Node 的 `fetch`,默认不读系统代理环境变量;连不上 Hugging Face 时(常见于国内网络)要设 `NODE_USE_ENV_PROXY=1` 才会走代理,应用目前不会自动提示这一点,用户会看到下载失败但不知道原因——留给后续批次处理(比如下载失败时给出更明确的排障提示)。
+
+工作流库(`apps/host/src/workflows/`,格式见 [docs/workflows.md](docs/workflows.md)):
+- 一个工作流就是数据目录里的 `<slug>/SKILL.md`:frontmatter 写 `name/title/description`,正文给人看,```workflow 围栏写窄 steps DSL。内置「默认工作流」在 Host 启动时物化到 `<数据目录>/workflows/topic-to-video/SKILL.md`,已有文件不覆盖。
+- 默认工作流:一句主题 → LLM 写文案和 3 个分镜 → `generate_video` 跑 3 段(每段 `seconds: 3`,即 73 帧)→ `concat_videos` 拼接 → `add_subtitle` 烧字幕。工作流 runner 复用聊天 agent 的 ai-sdk `tool()` 定义做参数校验,避免工具参数两处定义。
+- 聊天里让助手「以后都这么做」时,LLM 可调用 `save_workflow` 把刚才步骤存成 SKILL.md。页面「工作流库」能运行、查看原文、编辑保存;坏 SKILL.md 会被拒绝。没有 API key 时含 `write_script` 的工作流按聊天同一口径提示去设置。
 
 剪辑(`apps/host/src/ffmpeg/`):
 - agent 工具 `list_videos`、`trim_video`、`concat_videos`、`add_subtitle`,只按作品库 id 操作,结果作为新的一条入库(记 `editedFrom`),原片不动;容器元数据(含 `AI-generated with MiniMax H3`)从第一个输入带过来。

@@ -61,7 +61,8 @@ describe('聊天页', () => {
       return { ok: true as const };
     });
     const getKeyStatus = async () => ({ configured: hasKey, provider: 'deepseek' as const, providers: { deepseek: hasKey, anthropic: false } });
-    vi.stubGlobal('vidroom', { getKeyStatus, setKey, setProvider: vi.fn() });
+    const cloudApi = { getCloudKeyStatus: async () => ({ video: false, image: false }), setCloudKey: vi.fn(async () => ({ ok: true as const })) };
+    vi.stubGlobal('vidroom', { getKeyStatus, setKey, setProvider: vi.fn(), ...cloudApi });
 
     render(<App />);
     fireEvent.click(within(await screen.findByTestId('no-key-notice')).getByRole('link', { name: '去设置' }));
@@ -91,7 +92,8 @@ describe('聊天页', () => {
     });
     const setKey = vi.fn(async () => ({ ok: true as const }));
     const getKeyStatus = async () => ({ configured: provider === 'deepseek', provider, providers: { deepseek: true, anthropic: false } });
-    vi.stubGlobal('vidroom', { getKeyStatus, setKey, setProvider });
+    const cloudApi = { getCloudKeyStatus: async () => ({ video: false, image: false }), setCloudKey: vi.fn(async () => ({ ok: true as const })) };
+    vi.stubGlobal('vidroom', { getKeyStatus, setKey, setProvider, ...cloudApi });
 
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '设置' }));
@@ -102,6 +104,45 @@ describe('聊天页', () => {
     fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'sk-ant-fake' } });
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
     await waitFor(() => expect(setKey).toHaveBeenCalledWith('sk-ant-fake', 'anthropic'));
+  });
+
+  it('设置页:云端 key 交给主进程存,页面显示单价与配置状态,不显示 key 原文', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/workflows') return new Response(JSON.stringify({ workflows: [] }), { status: 200 });
+      if (url === '/api/videos') return new Response(JSON.stringify([]), { status: 200 });
+      if (url === '/api/cloud') {
+        return new Response(
+          JSON.stringify({
+            providers: [
+              { kind: 'video', label: '通义万相(阿里云百炼)', model: 'wan2.7-t2v', configured: false, consoleUrl: 'https://bailian.console.aliyun.com/', keyHint: '百炼控制台的 API-KEY' },
+              { kind: 'image', label: 'Seedream(火山方舟)', model: 'seedream-5-0-260128', configured: false, consoleUrl: 'https://console.volcengine.com/ark', keyHint: '方舟控制台的 API Key' },
+            ],
+            prices: { videoCentsPerSecond: { '720p': 60, '1080p': 100 }, imageCentsPerImage: 22 },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ hasApiKey: true }), { status: 200 });
+    }));
+    let configured = { video: false, image: false };
+    const setCloudKey = vi.fn(async (_key: string, kind: 'video' | 'image') => {
+      configured = { ...configured, [kind]: true };
+      return { ok: true as const };
+    });
+    const getKeyStatus = async () => ({ configured: true, provider: 'deepseek' as const, providers: { deepseek: true, anthropic: false } });
+    vi.stubGlobal('vidroom', { getKeyStatus, setKey: vi.fn(), setProvider: vi.fn(), getCloudKeyStatus: async () => configured, setCloudKey });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    expect(await screen.findByTestId('cloud-key-status')).toHaveTextContent('通义万相(阿里云百炼)(wan2.7-t2v):未配置');
+    expect(screen.getByText(/生视频 720p 0.60 元\/秒/)).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId('cloud-key-input'), { target: { value: 'sk-cloud-fake' } });
+    fireEvent.click(screen.getByTestId('save-cloud-key'));
+    expect(setCloudKey).toHaveBeenCalledWith('sk-cloud-fake', 'video');
+    await waitFor(() => expect(screen.getByTestId('cloud-key-status')).toHaveTextContent('已配置'));
+    expect(screen.getByTestId('cloud-key-input')).toHaveValue('');
+    expect(document.body.innerHTML).not.toContain('sk-cloud-fake');
   });
 
   it('浏览器里打开(没有桌面接口):设置页说明只在桌面版可用', async () => {

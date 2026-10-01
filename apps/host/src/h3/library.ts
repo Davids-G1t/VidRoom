@@ -6,10 +6,16 @@ import { join } from 'node:path';
  * 写入先写临时文件再改名,不会写一半。
  */
 
+/** 云端出片(阿里云百炼通义万相)的署名;写进记录里,作品库据此认它不是本机模型出的 */
+export const CLOUD_VIDEO_MODEL_LABEL = '通义万相 wan2.7-t2v';
+
 export interface VideoRecord {
   id: string;
-  /** 'HyperFrames' = 代码渲染(没有用 AI 模型),其余字段里 seed 为 0、显存/内存峰值为 null */
-  model: 'MiniMax H3' | 'HyperFrames';
+  /**
+   * 'HyperFrames' = 代码渲染(没有用 AI 模型),它的 seed 为 0、显存/内存峰值为 null;
+   * '通义万相 wan2.7-t2v' = 云端生成(不占本机显卡),显存/内存峰值同为 null
+   */
+  model: 'MiniMax H3' | 'HyperFrames' | typeof CLOUD_VIDEO_MODEL_LABEL;
   prompt: string;
   frames: number;
   seconds: number;

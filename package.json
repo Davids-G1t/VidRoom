@@ -26,7 +26,8 @@
     "motion:render": "pnpm --filter @vidroom/host motion:render",
     "motion:verify": "pnpm --filter @vidroom/host motion:verify",
     "test:e2e:motion": "pnpm build && playwright test --project=motion",
-    "test:e2e:workflow": "pnpm build && playwright test --project=workflow"
+    "test:e2e:workflow": "pnpm build && playwright test --project=workflow",
+    "test:e2e:cloud": "pnpm build && playwright test --project=cloud"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

@@ -9,7 +9,19 @@ export interface ToolCallRecord {
   output: unknown;
 }
 
-export type StatusResult = { kind: 'ok'; hasApiKey: boolean } | { kind: 'unauthorized' } | { kind: 'error' };
+export type StatusResult =
+  | {
+      kind: 'ok';
+      hasApiKey: boolean;
+      /** 本机出片档位(none / unsupported / experimental / default)—— 老版本 Host 不返回 */
+      tier?: string;
+      /** 用户在设置里选了「不用本机显卡」 */
+      forcedNoLocalGpu?: boolean;
+      /** 云端两家配没配 key */
+      cloud?: { video: boolean; image: boolean };
+    }
+  | { kind: 'unauthorized' }
+  | { kind: 'error' };
 
 export type ChatResult =
   | { kind: 'ok'; text: string; toolCalls: ToolCallRecord[] }
@@ -23,7 +35,16 @@ export async function fetchStatus(): Promise<StatusResult> {
     if (res.status === 401) return { kind: 'unauthorized' };
     if (!res.ok) return { kind: 'error' };
     const body = await res.json();
-    return { kind: 'ok', hasApiKey: Boolean(body.hasApiKey) };
+    return {
+      kind: 'ok',
+      hasApiKey: Boolean(body.hasApiKey),
+      tier: typeof body.tier === 'string' ? body.tier : undefined,
+      forcedNoLocalGpu: body.forcedNoLocalGpu === true,
+      cloud:
+        typeof body.cloud === 'object' && body.cloud !== null
+          ? { video: body.cloud.video === true, image: body.cloud.image === true }
+          : undefined,
+    };
   } catch {
     return { kind: 'error' };
   }
@@ -163,6 +184,7 @@ export interface WorkflowSummary {
   description: string;
   builtin: boolean;
   steps: number;
+  needsLocalGpu: boolean;
   updatedAt: string | null;
 }
 
@@ -207,6 +229,63 @@ export async function runWorkflow(id: string, topic: string): Promise<{ ok: true
 export async function fetchWorkflowJob(): Promise<WorkflowJob | null> {
   const body = await getJson<WorkflowJob>('/api/workflows/job');
   return body && typeof body.state === 'string' ? body : null;
+}
+
+/** 工作流运行中/待确认的云端估价,给设置页和估价卡用 */
+export type CloudKind = 'video' | 'image';
+
+export interface CloudProviderStatus {
+  kind: CloudKind;
+  label: string;
+  model: string;
+  configured: boolean;
+  /** 去哪申请 key(页面只显示链接,不收地址参数) */
+  consoleUrl: string;
+  keyHint: string;
+}
+
+export interface CloudStatus {
+  providers: CloudProviderStatus[];
+  prices: { videoCentsPerSecond: Record<'720p' | '1080p', number>; imageCentsPerImage: number };
+}
+
+/** 云端参数(估价工具原样带回来的那一份,确认时原样发回去) */
+export type CloudRequest =
+  | { kind: 'video'; prompt: string; seconds: number; resolution: '720p' | '1080p' }
+  | { kind: 'image'; prompt: string };
+
+export type CloudGenerateResult =
+  | { ok: true; kind: 'video'; video: VideoRecord }
+  | { ok: true; kind: 'image'; image: { id: string; file: string } }
+  | { ok: false; reason: string };
+
+export async function fetchCloud(): Promise<CloudStatus | null> {
+  const body = await getJson<CloudStatus>('/api/cloud');
+  return Array.isArray(body?.providers) ? body : null;
+}
+
+/**
+ * 真的花钱的那一下:只有用户在估价卡上点确认才会调这里。
+ * confirm:true 是 Host 的闸 —— 少了它一律 400。
+ */
+export async function generateCloud(request: CloudRequest): Promise<CloudGenerateResult> {
+  try {
+    const res = await fetch('/api/cloud/generate', post({ confirm: true, ...request }));
+    const body = await res.json();
+    if (!res.ok && body?.reason === undefined) return { ok: false, reason: body?.message ?? `云端生成失败(${res.status})` };
+    return body as CloudGenerateResult;
+  } catch {
+    return { ok: false, reason: '连不上 VidRoom Host。' };
+  }
+}
+
+/** 本机设置(目前只有「不用本机显卡」开关) */
+export interface AppSettings {
+  forceNoLocalGpu: boolean;
+}
+
+export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSettings | null> {
+  return getJson<AppSettings>('/api/settings', post(patch));
 }
 
 /** 许可原文随聊天页一起分发(public/licenses/) */

@@ -9,6 +9,8 @@ import { CAT_PROMPT } from '../apps/host/test/fixtures/h3-prompts';
  *   第二轮按工具结果说「已生成」或转述失败原因;
  * - 用户消息里带「开场动画」:第一轮调 render_motion(录好的固定分镜参数:标题 VidRoom、10 秒、gradient),
  *   第二轮按工具结果说「已渲染」或转述失败原因;
+ * - 用户消息里带「云端」:第一轮调 cloud_generate_video(固定中文提示词、5 秒 720p),
+ *   第二轮把估价原文说给用户(云端工具只估价,不发请求、不花钱);
  * - 用户消息以「慢」字开头就先挂住,直到测试调 release(),用来模拟「有任务在跑」;
  * - 记下每个请求的 Authorization 头,用来核对 Host 拿到的正是设置页存进去的 key。
  */
@@ -22,7 +24,13 @@ export interface FakeLlm {
 }
 
 interface ChatBody {
-  messages: Array<{ role: string; content?: string | null }>;
+  messages: Array<{ role: string; content?: string | null; tool_calls?: Array<{ function: { name: string } }> }>;
+}
+
+/** 这轮之前已经调过哪些工具。按 tool_calls 的实名判,不拿整段消息文本搜关键字 ——
+ * 系统提示里本来就会提到工具名(「save_workflow 允许的步骤」),按文本搜会误命中。 */
+function calledTools(messages: ChatBody['messages']): string[] {
+  return messages.filter((m) => m.role === 'assistant').flatMap((m) => (m.tool_calls ?? []).map((c) => c.function.name));
 }
 
 /** 录好的「做一条10秒的开场动画,标题是VidRoom」的工具调用参数 */
@@ -45,6 +53,21 @@ function videoReply(toolContent: string): string {
     return toolContent;
   }
 }
+
+/** 云端工具只估价:{ status: 'needs_confirmation', estimateText, ... } */
+function cloudReply(toolContent: string): string {
+  try {
+    const r = JSON.parse(toolContent);
+    if (r.status === 'needs_confirmation') return `${r.estimateText},确认后才会真的生成。`;
+    if (r.status === 'error') return `估价失败:${r.reason}`;
+    return toolContent;
+  } catch {
+    return toolContent;
+  }
+}
+
+/** 录好的云端生视频参数(e2e 里不真发请求,只走到估价与确认) */
+export const CLOUD_VIDEO_CALL = { prompt: '一只橘猫在夜里的书桌上,暖灯,镜头慢慢推近', seconds: 5, resolution: '720p' };
 
 const completion = (message: Record<string, unknown>, finishReason: string) => ({
   id: 'fake-1',
@@ -94,7 +117,7 @@ export async function startFakeLlm(): Promise<FakeLlm> {
     let reply;
     if (/分镜数:\s*3/.test(lastUser?.content ?? '')) {
       reply = completion({ content: workflowScript() }, 'stop');
-    } else if (tool?.content && /save_workflow/.test(JSON.stringify(body.messages))) {
+    } else if (tool?.content && calledTools(body.messages).includes('save_workflow')) {
       reply = completion({ content: '已保存到工作流库。' }, 'stop');
     } else if (/以后都这么做|保存这个流程/.test(lastUser?.content ?? '')) {
       reply = completion(
@@ -123,6 +146,22 @@ export async function startFakeLlm(): Promise<FakeLlm> {
             {
               content: null,
               tool_calls: [{ id: 'call_m1', type: 'function', function: { name: 'render_motion', arguments: JSON.stringify(MOTION_CALL) } }],
+            },
+            'tool_calls',
+          );
+    } else if (/云端/.test(lastUser?.content ?? '')) {
+      reply = tool
+        ? completion({ content: cloudReply(String(tool.content ?? '')) }, 'stop')
+        : completion(
+            {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_c1',
+                  type: 'function',
+                  function: { name: 'cloud_generate_video', arguments: JSON.stringify(CLOUD_VIDEO_CALL) },
+                },
+              ],
             },
             'tool_calls',
           );

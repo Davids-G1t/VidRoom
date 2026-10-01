@@ -13,6 +13,7 @@ import {
   type VideoRecord,
 } from './api';
 import { ComfyPanel } from './ComfyPanel';
+import { CloudConfirm, cloudEstimates } from './CloudConfirm';
 import { desktopApi } from './desktop';
 import { H3Panel } from './H3Panel';
 import { Settings } from './Settings';
@@ -66,6 +67,13 @@ export function App() {
 
   const hasKey = status?.kind === 'ok' && status.hasApiKey;
   const noKey = status?.kind === 'ok' && !status.hasApiKey;
+  // 本机跑不动:没 N 卡、显存太小,或用户在设置里强制「不用本机显卡」。
+  // 这时本机出片的两处入口都不显示 —— 直接的「MiniMax H3 出片」面板,和工作流库里那个「运行」
+  // (默认工作流里就有本地出片那一步)—— 换渲染云端入口。两件事要一起发生(合同第 6b 批验收①)。
+  // ComfyUI 面板留着:它只起停引擎,不自己出片。
+  const localDisabled = status?.kind === 'ok' && (status.tier === 'none' || status.tier === 'unsupported');
+  const cloudConfigured = status?.kind === 'ok' && (status.cloud?.video === true || status.cloud?.image === true);
+  const refreshVideos = () => void fetchVideos().then(setVideos);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -133,13 +141,30 @@ export function App() {
         </div>
       )}
 
+      {localDisabled && (
+        <section className="h3" data-testid="cloud-panel" aria-label="云端出片">
+          <div className="h3-row">
+            <span className="badge">云端出片</span>
+            <span className="notice" data-testid="cloud-hint">
+              {cloudConfigured
+                ? '本机显卡跑不动,已换云端:在下面的聊天框说一句要什么,助手会走云端。花钱前先给你估价,你点确认才真发请求。'
+                : '本机显卡跑不动,而云端还没配 key —— 去设置里填一把(阿里云百炼 / 火山方舟),或者在设置里把「不用本机显卡」关掉。'}
+            </span>
+          </div>
+        </section>
+      )}
+
       {settingsOpen && (
         <Settings onSaved={() => fetchStatus().then(setStatus)} onClose={() => setSettingsOpen(false)} />
       )}
 
-      <WorkflowPanel onNotice={setNotice} onVideosChanged={() => fetchVideos().then(setVideos)} />
+      <WorkflowPanel
+        localDisabled={localDisabled}
+        onNotice={setNotice}
+        onVideosChanged={() => fetchVideos().then(setVideos)}
+      />
 
-      <H3Panel />
+      {!localDisabled && <H3Panel />}
 
       <ComfyPanel />
 
@@ -162,6 +187,9 @@ export function App() {
                 <summary>调用了工具:{m.toolCalls.map((t) => t.toolName).join('、')}</summary>
                 <pre>{JSON.stringify(m.toolCalls, null, 2)}</pre>
               </details>
+            )}
+            {m.role === 'assistant' && (
+              <CloudConfirm estimates={cloudEstimates(m.toolCalls)} onNotice={setNotice} onVideosChanged={refreshVideos} />
             )}
           </div>
         ))}

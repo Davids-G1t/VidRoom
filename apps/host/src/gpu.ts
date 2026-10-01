@@ -36,6 +36,8 @@ export interface GpuProbeResult {
   tier: GpuTier;
   /** 给 agent 看的一句话解释 */
   summary: string;
+  /** true = 用户在设置里选了「不用本机显卡」,tier 是被改小了,不是硬件不行 */
+  forcedNoLocalGpu?: boolean;
 }
 
 export const TIER_MIN_GIB = { experimental: 15, default: 24 } as const;
@@ -96,4 +98,18 @@ export const runNvidiaSmi: RunNvidiaSmi = () =>
 
 export async function probeGpu(run: RunNvidiaSmi = runNvidiaSmi): Promise<GpuProbeResult> {
   return resultFromOutput(await run());
+}
+
+/**
+ * 用户在设置里选了「不用本机显卡」时,把档位按 none 处理(硬件信息照旧如实报)。
+ * 云端生成走 cloud/ 那套,不受这里影响。
+ */
+export function withForcedTier(result: GpuProbeResult, force: boolean): GpuProbeResult {
+  if (!force || result.tier === 'none') return result;
+  return {
+    ...result,
+    tier: 'none',
+    forcedNoLocalGpu: true,
+    summary: `用户选择了「不用本机显卡出片」,本地档位按 none 处理。硬件本身:${result.summary}`,
+  };
 }

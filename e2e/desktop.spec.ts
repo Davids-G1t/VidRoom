@@ -177,7 +177,12 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
       process: typeof (globalThis as { process?: unknown }).process,
       bridge: Object.keys((window as unknown as { vidroom: object }).vidroom).sort(),
     }));
-    expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['getKeyStatus', 'openAbuseReport', 'openComfyUI', 'setKey', 'setProvider'] });
+    expect(surface).toEqual({
+      require: 'undefined',
+      process: 'undefined',
+      // 桥面只多不少地列在这里:preload 每次加方法都要动这行,防止不小心把 ipcRenderer 本身暴露出去
+      bridge: ['getCloudKeyStatus', 'getKeyStatus', 'openAbuseReport', 'openComfyUI', 'setCloudKey', 'setKey', 'setProvider'],
+    });
     const prefs = await first.app.evaluate(({ BrowserWindow }) => {
       const p = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
       return { sandbox: p?.sandbox, contextIsolation: p?.contextIsolation, nodeIntegration: p?.nodeIntegration };
@@ -189,7 +194,7 @@ test('桌面版:存假 key → 重启 → 聊天可用、显示显卡档位;有�
     await page.getByTestId('no-key-notice').getByRole('link', { name: '去设置' }).click();
     await expect(page.getByTestId('key-status')).toHaveText(/未配置/);
     await page.getByLabel('DeepSeek API key').fill(FAKE_KEY);
-    await page.getByRole('button', { name: '保存' }).click();
+    await page.getByRole('button', { name: '保存', exact: true }).click();
     await expect(page.getByTestId('settings-message')).toHaveText('已保存。');
     await expect(page.getByTestId('key-status')).toHaveText(/已配置/);
     await expect(page.getByTestId('no-key-notice')).toHaveCount(0);

@@ -1,6 +1,6 @@
 import { fork, type ChildProcess } from 'node:child_process';
 import type { LlmProvider } from '../../host/src/llm-provider.js';
-import type { HostToParent, SetKeyMessage } from '../../host/src/parent-ipc.js';
+import type { CloudKeyKind, HostToParent, ParentMessage } from '../../host/src/parent-ipc.js';
 
 /**
  * Host 子进程:用 ELECTRON_RUN_AS_NODE=1 把 Electron 自己(process.execPath)当 Node 跑,
@@ -58,8 +58,12 @@ export class HostProcess {
     return this.child?.pid;
   }
 
-  /** 起 Host 并交给它 key;等它监听好、主进程换到 cookie 才返回 */
-  async start(provider: LlmProvider, apiKey: string | null): Promise<void> {
+  /** 起 Host 并交给它 key(LLM 一家 + 云端两家);等它监听好、主进程换到 cookie 才返回 */
+  async start(
+    provider: LlmProvider,
+    apiKey: string | null,
+    cloudKeys: Record<CloudKeyKind, string | null> = { video: null, image: null },
+  ): Promise<void> {
     const log = this.opts.log ?? console.log;
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -70,9 +74,11 @@ export class HostProcess {
     // Host 在 IPC 模式下本来就不读 key 文件;这里也不把开发用的 key 文件路径传下去
     delete env.VIDROOM_DEEPSEEK_KEY_FILE;
     delete env.VIDROOM_ANTHROPIC_KEY_FILE;
+    delete env.VIDROOM_CLOUD_VIDEO_KEY_FILE;
+    delete env.VIDROOM_CLOUD_IMAGE_KEY_FILE;
     // @ai-sdk/anthropic 在没给 baseURL 时会读 ANTHROPIC_BASE_URL;Host 已显式传官方地址,这里再去掉一层
     delete env.ANTHROPIC_BASE_URL;
-    for (const name of ['VIDROOM_DEEPSEEK_BASE_URL', 'VIDROOM_ANTHROPIC_BASE_URL']) {
+    for (const name of ['VIDROOM_DEEPSEEK_BASE_URL', 'VIDROOM_ANTHROPIC_BASE_URL', 'VIDROOM_CLOUD_VIDEO_BASE_URL', 'VIDROOM_CLOUD_IMAGE_BASE_URL']) {
       const safeBaseURL = sanitizeTestBaseURL(env[name]);
       if (env[name] && !safeBaseURL) log(`[vidroom-desktop] 忽略 ${name}(不是回环地址):${env[name]}`);
       if (safeBaseURL) env[name] = safeBaseURL;
@@ -103,6 +109,8 @@ export class HostProcess {
     const first = await ready;
     if (first.type !== 'ready') throw new Error(`Host 首条消息不是 ready:${first.type}`);
     await applied;
+    // 云端两家单独交一次(在 ready 之后发,免得回复顺序与等待队列错位)
+    await this.setCloudKeys(cloudKeys);
     await this.redeem(first.launchUrl);
   }
 
@@ -112,6 +120,18 @@ export class HostProcess {
     this.send({ type: 'set-key', provider, apiKey });
     const msg = await applied;
     if (msg.type !== 'key-applied') throw new Error(`Host 回复不是 key-applied:${msg.type}`);
+  }
+
+  /**
+   * 把云端两家(生视频 / 生图)的 key 交给 Host。Host 还没起(还没配 LLM key)时静默跳过 ——
+   * 那两把 key 存在主进程的加密文件里,下次 start() 会一起带上。
+   */
+  async setCloudKeys(keys: Record<CloudKeyKind, string | null>): Promise<void> {
+    if (!this.child) return;
+    const applied = this.next();
+    this.send({ type: 'set-cloud-keys', keys });
+    const msg = await applied;
+    if (msg.type !== 'cloud-keys-applied') throw new Error(`Host 回复不是 cloud-keys-applied:${msg.type}`);
   }
 
   /** 带上 session cookie 转发一个 /api 请求给 Host */
@@ -129,7 +149,7 @@ export class HostProcess {
     child.kill();
   }
 
-  private send(msg: SetKeyMessage): void {
+  private send(msg: ParentMessage): void {
     if (!this.child?.connected) throw new Error('Host 子进程不在');
     this.child.send(msg);
   }

@@ -2,6 +2,12 @@ import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 
+/**
+ * 工作流 steps 只允许本机工具。
+ * 云端生成(cloud_generate_video / cloud_generate_image)故意不在里面:那两个工具在聊天里只估价、
+ * 必须用户在估价卡上点确认才花钱,工作流是「跑一次出一串产物」的形态,没有中途确认这一说,
+ * 所以云端步骤现在存不了、也跑不了。要支持得先给 runner 加「跑到云端步骤就停下等确认」的状态机。
+ */
 export const WORKFLOW_TOOLS = ['write_script', 'generate_video', 'trim_video', 'concat_videos', 'add_subtitle', 'render_motion', 'list_videos'] as const;
 
 export const WorkflowStepSchema = z.object({
@@ -36,6 +42,8 @@ export interface WorkflowSummary {
   description: string;
   builtin: boolean;
   steps: number;
+  /** 步骤里有本地出片(generate_video)时为真:没显卡档时前端拿它决定收不收「运行」 */
+  needsLocalGpu: boolean;
   updatedAt: string | null;
 }
 
@@ -186,6 +194,8 @@ export function toSummary(def: WorkflowDefinition): WorkflowSummary {
     description: def.description,
     builtin: def.builtin,
     steps: def.steps.length,
+    // 只有本地出片这一步吃显卡;剪拼、烧字幕、代码渲染(render_motion)没显卡也能跑
+    needsLocalGpu: def.steps.some((s) => s.tool === 'generate_video'),
     updatedAt: def.updatedAt ?? null,
   };
 }

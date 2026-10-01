@@ -12,14 +12,39 @@ export interface SetKeyMessage {
   apiKey: string | null;
 }
 
+/** 云端两家(生视频/生图)的 key;与 LLM key 相互独立,null = 清掉 */
+export type CloudKeyKind = 'video' | 'image';
+
+export interface SetCloudKeysMessage {
+  type: 'set-cloud-keys';
+  keys: Record<CloudKeyKind, string | null>;
+}
+
+/** 壳 → Host 的全部消息 */
+export type ParentMessage = SetKeyMessage | SetCloudKeysMessage;
+
 /** Host → 壳 */
 export type HostToParent =
   | { type: 'ready'; launchUrl: string }
-  | { type: 'key-applied'; hasApiKey: boolean };
+  | { type: 'key-applied'; hasApiKey: boolean }
+  | { type: 'cloud-keys-applied' };
 
-export function parseParentMessage(raw: unknown): SetKeyMessage | null {
+export function parseParentMessage(raw: unknown): ParentMessage | null {
   if (typeof raw !== 'object' || raw === null) return null;
-  const { type, provider, apiKey } = raw as { type?: unknown; provider?: unknown; apiKey?: unknown };
+  const { type } = raw as { type?: unknown };
+  if (type === 'set-cloud-keys') {
+    const keys = (raw as { keys?: unknown }).keys;
+    if (typeof keys !== 'object' || keys === null) return null;
+    const parsed = {} as Record<CloudKeyKind, string | null>;
+    for (const kind of ['video', 'image'] as const) {
+      const value = (keys as Record<string, unknown>)[kind];
+      if (value === null) parsed[kind] = null;
+      else if (typeof value === 'string' && value.trim() !== '') parsed[kind] = value.trim();
+      else return null;
+    }
+    return { type, keys: parsed };
+  }
+  const { provider, apiKey } = raw as { provider?: unknown; apiKey?: unknown };
   if (type !== 'set-key' || !isLlmProvider(provider)) return null;
   if (apiKey === null) return { type, provider, apiKey: null };
   if (typeof apiKey !== 'string' || apiKey.trim() === '') return null;

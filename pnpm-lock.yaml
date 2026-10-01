@@ -38,9 +38,15 @@ importers:
       7zip-bin:
         specifier: ^5.2.0
         version: 5.2.0
+      '@ai-sdk/alibaba':
+        specifier: ^2.0.60
+        version: 2.0.60(zod@4.6.5)
       '@ai-sdk/anthropic':
         specifier: ^4.0.70
         version: 4.0.70(zod@4.6.5)
+      '@ai-sdk/bytedance':
+        specifier: ^2.0.56
+        version: 2.0.56(zod@4.6.5)
       '@ai-sdk/deepseek':
         specifier: ^3.0.57
         version: 3.0.57(zod@4.6.5)
@@ -109,8 +115,20 @@ packages:
   '@adobe/css-tools@4.5.0':
     resolution: {integrity: sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==}
 
+  '@ai-sdk/alibaba@2.0.60':
+    resolution: {integrity: sha512-xBT93yWdxIKa8ocIQeMQuSSLxB13pDzbMSWvj/NXwmYNxoeCQergZAqJpBykHB7r4cYY0O1OMfu+WAMokHOiYQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
   '@ai-sdk/anthropic@4.0.70':
     resolution: {integrity: sha512-uCuMH4CCL3DXOL0mXyyzfV7KSIPc+ka6X7qiq5HT9hkBdMMJF9SLzfSKOshoLHiSc/xSnFYWLHwlBxMMlaITrg==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/bytedance@2.0.56':
+    resolution: {integrity: sha512-4kHolH6FVejEu9E4rdbqTcuyAVBecku45m4NRB0pVlHrYLhG1CERwfvmFuV8LyaFOTY+KTCXXMmZIQelvsgGqA==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -2163,7 +2181,19 @@ snapshots:
 
   '@adobe/css-tools@4.5.0': {}
 
+  '@ai-sdk/alibaba@2.0.60(zod@4.6.5)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.21
+      '@ai-sdk/provider-utils': 5.0.53(zod@4.6.5)
+      zod: 4.6.5
+
   '@ai-sdk/anthropic@4.0.70(zod@4.6.5)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.21
+      '@ai-sdk/provider-utils': 5.0.53(zod@4.6.5)
+      zod: 4.6.5
+
+  '@ai-sdk/bytedance@2.0.56(zod@4.6.5)':
     dependencies:
       '@ai-sdk/provider': 4.0.21
       '@ai-sdk/provider-utils': 5.0.53(zod@4.6.5)

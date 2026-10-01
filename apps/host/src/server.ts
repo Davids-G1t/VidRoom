@@ -7,8 +7,10 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import type { LanguageModel } from 'ai';
 import { LaunchAuth, SESSION_COOKIE, parseCookies, sessionCookieHeader } from './auth.js';
 import { runChat, type ChatMessage } from './agent.js';
+import type { CloudService } from './cloud/service.js';
 import type { VideoEditor } from './ffmpeg/editor.js';
-import type { RunNvidiaSmi } from './gpu.js';
+import { probeGpu, withForcedTier, type RunNvidiaSmi } from './gpu.js';
+import type { SettingsStore } from './settings.js';
 import type { ComfyManager } from './comfyui/manager.js';
 import { publicVideo } from './h3/library.js';
 import type { VideoService } from './h3/service.js';
@@ -41,6 +43,10 @@ export interface HostOptions {
   motion?: MotionService;
   /** 工作流库;不给就没有 /api/workflows 接口和 save_workflow 工具 */
   workflows?: WorkflowService;
+  /** 云端生成(BYOK);不给就没有 /api/cloud 接口和云端工具 */
+  cloud?: CloudService;
+  /** 用户设置(档位开关);不给就一律按默认值 */
+  settings?: SettingsStore;
 }
 
 export interface Host {
@@ -49,6 +55,8 @@ export interface Host {
   launchUrl: string;
   /** 换模型(桌面壳在设置页存了新 key 时调用);需要抹掉的秘密一并换掉 */
   setModel(model: LanguageModel | null, secrets: string[]): void;
+  /** 只换「要抹掉的秘密」(云端 key 变了但 LLM 没变时用) */
+  setSecrets(secrets: string[]): void;
   close(): Promise<void>;
 }
 
@@ -98,6 +106,13 @@ function redact(text: string, secrets: string[]): string {
   return secrets.reduce((t, s) => (s ? t.split(s).join('[REDACTED]') : t), text);
 }
 
+/** 云端两家各自配没配 key(给页面判断要不要显示云端入口) */
+function cloudKeyFlags(cloud: CloudService | undefined): { video: boolean; image: boolean } {
+  const flags = { video: false, image: false };
+  for (const p of cloud?.status().providers ?? []) flags[p.kind] = p.configured;
+  return flags;
+}
+
 export async function startHost(opts: HostOptions): Promise<Host> {
   const auth = new LaunchAuth();
   const webRoot = resolve(opts.webDir);
@@ -136,7 +151,30 @@ export async function startHost(opts: HostOptions): Promise<Host> {
     }
 
     if (pathname === '/api/status' && req.method === 'GET') {
-      sendJson(res, 200, { hasApiKey: model !== null });
+      const force = opts.settings?.get().forceNoLocalGpu === true;
+      const gpu = withForcedTier(await probeGpu(opts.runNvidiaSmi), force);
+      sendJson(res, 200, {
+        hasApiKey: model !== null,
+        tier: gpu.tier,
+        forcedNoLocalGpu: force,
+        cloud: cloudKeyFlags(opts.cloud),
+      });
+      return;
+    }
+
+    if (pathname === '/api/settings' && req.method === 'POST') {
+      let body: unknown = null;
+      try {
+        body = await readJson(req);
+      } catch {
+        body = null;
+      }
+      const force = (body as { forceNoLocalGpu?: unknown } | null)?.forceNoLocalGpu;
+      if (!opts.settings || typeof force !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request', message: '需要 { forceNoLocalGpu: true 或 false }。' });
+        return;
+      }
+      sendJson(res, 200, opts.settings.set({ forceNoLocalGpu: force }));
       return;
     }
 
@@ -162,6 +200,8 @@ export async function startHost(opts: HostOptions): Promise<Host> {
           editor: opts.editor,
           motion: opts.motion,
           workflows: opts.workflows,
+          cloud: opts.cloud,
+          forceNoLocalGpu: opts.settings?.get().forceNoLocalGpu === true,
         });
         sendJson(res, 200, reply);
       } catch (err) {
@@ -188,6 +228,7 @@ export async function startHost(opts: HostOptions): Promise<Host> {
 
     if (opts.video && (await handleVideoApi(opts.video, req, res, pathname, url))) return;
     if (opts.workflows && (await handleWorkflowApi(opts.workflows, req, res, pathname))) return;
+    if (opts.cloud && (await handleCloudApi(opts.cloud, req, res, pathname))) return;
 
     sendJson(res, 404, { error: 'not_found' });
   }
@@ -248,11 +289,74 @@ export async function startHost(opts: HostOptions): Promise<Host> {
       opts.workflows?.setModel(m);
       secrets = s;
     },
+    setSecrets: (s) => {
+      secrets = s;
+    },
     close: async () => {
       await opts.comfy?.stop();
       await new Promise<void>((ok, fail) => server.close((e) => (e ? fail(e) : ok())));
     },
   };
+}
+
+/**
+ * 云端生成接口。**唯一会让用户花钱的入口** —— 只有这里(以及它调的服务)真的发请求:
+ * 聊天里的工具只估价,用户在页面估价卡上点确认后,页面才带着同一份参数打这里。
+ * 所以 body 里必须显式带 confirm:true,免得别处顺手打进这个路由就把钱花了。
+ */
+async function handleCloudApi(cloud: CloudService, req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
+  const method = req.method;
+  if (pathname === '/api/cloud' && method === 'GET') {
+    sendJson(res, 200, cloud.status());
+    return true;
+  }
+  if (pathname === '/api/cloud/generate' && method === 'POST') {
+    let body: unknown = null;
+    try {
+      body = await readJson(req);
+    } catch {
+      body = null;
+    }
+    const b = body as { confirm?: unknown; kind?: unknown; prompt?: unknown; seconds?: unknown; resolution?: unknown; count?: unknown } | null;
+    if (b?.confirm !== true) {
+      sendJson(res, 400, { error: 'needs_confirmation', message: '云端生成要花钱,请求里必须带 confirm:true(用户点确认后才发)。' });
+      return true;
+    }
+    const kind = b.kind;
+    try {
+      const result =
+        kind === 'video'
+          ? await cloud.generateVideo({
+              prompt: String(b.prompt ?? ''),
+              seconds: typeof b.seconds === 'number' ? b.seconds : undefined,
+              resolution: b.resolution === '1080p' ? '1080p' : b.resolution === '720p' ? '720p' : undefined,
+            })
+          : kind === 'image'
+            ? await cloud.generateImage({ prompt: String(b.prompt ?? ''), count: typeof b.count === 'number' ? b.count : undefined })
+            : null;
+      if (result === null) {
+        sendJson(res, 400, { error: 'bad_request', message: 'kind 只能是 video 或 image。' });
+        return true;
+      }
+      sendJson(res, result.ok ? 200 : 502, result);
+    } catch (err) {
+      sendJson(res, 400, { error: 'bad_request', message: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+  const image = /^\/api\/cloud\/images\/([\w-]+)\.png$/.exec(pathname);
+  if (image && method === 'GET') {
+    const file = cloud.imagePath(image[1]);
+    const size = file ? await stat(file).then((s) => s.size, () => null) : null;
+    if (!file || size === null) {
+      sendJson(res, 404, { error: 'not_found' });
+      return true;
+    }
+    res.writeHead(200, { 'content-type': 'image/png', 'content-length': size, 'cache-control': 'no-store' });
+    await pipeline(createReadStream(file), res);
+    return true;
+  }
+  return false;
 }
 
 async function handleWorkflowApi(workflows: WorkflowService, req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {

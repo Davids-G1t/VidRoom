@@ -75,11 +75,21 @@ VidRoom 的做法:**不让 HyperFrames 自己下载**。`apps/host/src/motion/br
 
 | 项 | 值 |
 |---|---|
-| 是什么 | [vercel/ai](https://github.com/vercel/ai)(AI SDK):统一的模型调用层。`@ai-sdk/anthropic` 走 Anthropic 的 Messages API,`@ai-sdk/deepseek` 走 DeepSeek 的 API |
-| 版本 | `@ai-sdk/anthropic@4.0.70`(第 5 批新增)、`@ai-sdk/deepseek@3.0.57`(第 5 批之前就有),由 `pnpm-lock.yaml` 锁版本 |
-| 许可 | 两个都是 Apache-2.0(2026-10-01 查 npm registry 元数据核实) |
+| 是什么 | [vercel/ai](https://github.com/vercel/ai)(AI SDK):统一的模型调用层。`@ai-sdk/anthropic` 走 Anthropic 的 Messages API,`@ai-sdk/deepseek` 走 DeepSeek 的 API,`@ai-sdk/alibaba` 走阿里云百炼(通义万相生视频),`@ai-sdk/bytedance` 走火山方舟(Seedream 生图) |
+| 版本 | `@ai-sdk/anthropic@4.0.70`(第 5 批新增)、`@ai-sdk/deepseek@3.0.57`(第 5 批之前就有)、`@ai-sdk/alibaba@2.0.60` 与 `@ai-sdk/bytedance@2.0.56`(第 6b 批新增),由 `pnpm-lock.yaml` 锁版本 |
+| 许可 | 四个都是 Apache-2.0(2026-10-02 查 npm registry 元数据核实) |
 | 怎么来 | `pnpm install`,与其它运行时依赖一样随应用打包分发,不单独下载、不跑安装脚本 |
 | 怎么用 | `apps/host` 按用户选的提供方建模型实例,只用它发 HTTP 请求。不含任何模型权重,API key 由用户在设置里填、存 `safeStorage` |
+
+## 云端生成服务(不自带、用户自带 key)
+
+| 项 | 值 |
+|---|---|
+| 是什么 | 阿里云百炼(生视频,模型 `wan2.7-t2v`)与火山方舟(生图,模型 `seedream-5-0-260128`)。都是托管服务,不是本地组件 |
+| 怎么来 | VidRoom **不分发、不代理、不代付**。用户自己在厂商控制台开账号拿 API key,填进设置页;key 加密存在本机,请求由 Host 从用户机器直连厂商 |
+| 用在哪 | 本机显卡跑不动、或用户明说要用云端时;工具先估价、用户在页面上点确认才真花 |
+| 价目 | 生视频 720p ¥0.60/秒、1080p ¥1.00/秒(阿里云百炼官网「视频生成(720P) 0.6 每秒」);生图 ¥0.22/张(火山方舟 Ark 价目页口径;另有「大模型接入」页作 ¥0.33,以 Ark 价目页为准) |
+| 许可/条款 | 各自的服务条款约束生成内容所有权与使用范围,不在本仓管辖内;VidRoom 只负责把提示词发出去、把成片存进作品库 |
 
 ## 借鉴但没有引入代码的项目
 

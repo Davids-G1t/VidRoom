@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { fetchCloud, fetchStatus, saveSettings, type CloudKind, type CloudStatus } from './api';
 import { desktopApi, type LlmProvider } from './desktop';
 
 const PROVIDERS: Array<{ id: LlmProvider; label: string; note: string }> = [
@@ -8,8 +9,9 @@ const PROVIDERS: Array<{ id: LlmProvider; label: string; note: string }> = [
 const labelOf = (p: LlmProvider) => PROVIDERS.find((x) => x.id === p)!.label;
 
 /**
- * 设置页:选用哪家 LLM(DeepSeek 或 Anthropic),给它填 key。key 交给桌面版主进程加密保存,
- * 页面之后再也拿不回来,只能知道「有没有配置」。浏览器里打开(命令行开发)时没有这个能力。
+ * 设置页:选用哪家 LLM(DeepSeek 或 Anthropic),给它填 key;再配云端两家(生视频/生图,BYOK)的 key;
+ * 加一个「不用本机显卡」开关。key 交给桌面版主进程加密保存,页面之后再也拿不回来,只能知道「有没有配置」。
+ * 浏览器里打开(命令行开发)时没有存 key 的能力,但开关仍可用(存 Host 的数据目录)。
  */
 export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: () => void }) {
   const api = desktopApi();
@@ -18,6 +20,13 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
   const [key, setKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [cloud, setCloud] = useState<CloudStatus | null>(null);
+  const [cloudConfigured, setCloudConfigured] = useState<{ video: boolean; image: boolean }>({ video: false, image: false });
+  const [cloudKind, setCloudKind] = useState<CloudKind>('video');
+  const [cloudKey, setCloudKey] = useState('');
+  const [cloudSaving, setCloudSaving] = useState(false);
+  const [cloudMessage, setCloudMessage] = useState<string | null>(null);
+  const [forceNoLocalGpu, setForceNoLocalGpu] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
     const s = await api?.getKeyStatus();
@@ -28,7 +37,10 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    void fetchCloud().then(setCloud);
+    void api?.getCloudKeyStatus().then(setCloudConfigured);
+    void fetchStatus().then((s) => setForceNoLocalGpu(s.kind === 'ok' ? s.forcedNoLocalGpu === true : null));
+  }, [refresh, api]);
 
   async function choose(next: LlmProvider) {
     if (!api || next === provider || saving) return;
@@ -63,6 +75,42 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
   }
 
   const configured = providers ? providers[provider] : null;
+  const cloudInfo = cloud?.providers.find((p) => p.kind === cloudKind) ?? null;
+
+  async function submitCloudKey(e: FormEvent) {
+    e.preventDefault();
+    if (!api || !cloudKey.trim() || cloudSaving) return;
+    setCloudSaving(true);
+    setCloudMessage(null);
+    try {
+      const result = await api.setCloudKey(cloudKey, cloudKind);
+      if (result.ok) {
+        setCloudKey('');
+        setCloudMessage('已保存。');
+        setCloudConfigured(await api.getCloudKeyStatus());
+      } else {
+        setCloudMessage(result.message);
+      }
+    } catch {
+      setCloudMessage('保存失败,请重试。');
+    } finally {
+      setCloudSaving(false);
+    }
+  }
+
+  async function toggleForceNoLocalGpu(next: boolean) {
+    // 先按用户的动作切,别等网络往返 —— 往返期间控件会被 React 拉回原状,看起来像点了没反应
+    setForceNoLocalGpu(next);
+    const saved = await saveSettings({ forceNoLocalGpu: next });
+    if (!saved) {
+      setForceNoLocalGpu(!next);
+      setMessage('设置没保存上,请重试。');
+      return;
+    }
+    setForceNoLocalGpu(saved.forceNoLocalGpu);
+    onSaved();
+  }
+
   return (
     <section className="settings" data-testid="settings" aria-label="设置">
       <h2>设置</h2>
@@ -100,6 +148,94 @@ export function Settings({ onSaved, onClose }: { onSaved: () => void; onClose: (
             保存
           </button>
         </form>
+      )}
+
+      <fieldset className="cloud-settings">
+        <legend>云端出片(可选,自带 key)</legend>
+        <p>
+          本机跑不动(没 N 卡或显存太小)时,可以用云端生成。云端按量计费:
+          {cloud
+            ? ` 生视频 720p ${(cloud.prices.videoCentsPerSecond['720p'] / 100).toFixed(2)} 元/秒、1080p ${(
+                cloud.prices.videoCentsPerSecond['1080p'] / 100
+              ).toFixed(2)} 元/秒;生图 ${(cloud.prices.imageCentsPerImage / 100).toFixed(2)} 元/张。`
+            : ' 单价见云端控制台。'}
+          key 由你自己申请,存在本机(和 LLM key 一样的加密存储)。
+        </p>
+        <label>
+          <input
+            type="radio"
+            name="cloud-kind"
+            checked={cloudKind === 'video'}
+            onChange={() => {
+              setCloudKind('video');
+              setCloudMessage(null);
+            }}
+          />
+          生视频
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="cloud-kind"
+            checked={cloudKind === 'image'}
+            onChange={() => {
+              setCloudKind('image');
+              setCloudMessage(null);
+            }}
+          />
+          生图
+        </label>
+        <p data-testid="cloud-key-status">
+          {cloudInfo ? `${cloudInfo.label}(${cloudInfo.model})` : '云端服务'}:{cloudConfigured[cloudKind] ? '已配置' : '未配置'}
+          {cloudInfo && (
+            <>
+              {' '}
+              <a href={cloudInfo.consoleUrl} target="_blank" rel="noreferrer">
+                去申请 key
+              </a>
+              {`(${cloudInfo.keyHint})`}
+            </>
+          )}
+        </p>
+        {api ? (
+          <form onSubmit={submitCloudKey}>
+            <label>
+              {cloudConfigured[cloudKind] ? '换一个新的 key' : '填入 key'}
+              <input
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="云端 key"
+                data-testid="cloud-key-input"
+                value={cloudKey}
+                onChange={(e) => setCloudKey(e.target.value)}
+              />
+            </label>
+            <button type="submit" data-testid="save-cloud-key" disabled={!cloudKey.trim() || cloudSaving}>
+              保存云端 key
+            </button>
+          </form>
+        ) : (
+          <p>
+            命令行开发时用环境变量 VIDROOM_CLOUD_VIDEO_KEY_FILE / VIDROOM_CLOUD_IMAGE_KEY_FILE 指定 key 文件。
+          </p>
+        )}
+
+        <label>
+          <input
+            type="checkbox"
+            data-testid="force-no-gpu"
+            checked={forceNoLocalGpu === true}
+            disabled={forceNoLocalGpu === null}
+            onChange={(e) => void toggleForceNoLocalGpu(e.target.checked)}
+          />
+          不用本机显卡出片(一律当成本机跑不动,走云端或代码渲染)
+        </label>
+      </fieldset>
+      {cloudMessage && (
+        <p className="notice" data-testid="cloud-key-message">
+          {cloudMessage}
+        </p>
       )}
       {message && (
         <p className="notice" data-testid="settings-message">

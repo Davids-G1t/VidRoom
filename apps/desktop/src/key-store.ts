@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isLlmProvider, type LlmProvider } from '../../host/src/llm-provider.js';
+import type { CloudKeyKind } from '../../host/src/parent-ipc.js';
 
 /**
  * LLM API key(DeepSeek / Anthropic 各一份文件)的加密落盘,以及「当前用哪家」的选择。这个文件不 import electron,加解密函数由 main.ts 传入
@@ -12,6 +13,19 @@ import { isLlmProvider, type LlmProvider } from '../../host/src/llm-provider.js'
 
 export const KEY_FILE_NAME = 'deepseek-key.enc';
 export const KEY_FILE_NAMES: Record<LlmProvider, string> = { deepseek: KEY_FILE_NAME, anthropic: 'anthropic-key.enc' };
+/** 云端(生视频 / 生图)两家各一份,和 LLM key 同一个存法 */
+export type { CloudKeyKind };
+export const CLOUD_KEY_FILE_NAMES: Record<CloudKeyKind, string> = {
+  video: 'cloud-video-key.enc',
+  image: 'cloud-image-key.enc',
+};
+/** 一份 key 存哪:LLM 两家 + 云端两家 */
+export type KeySlot = LlmProvider | `cloud-${CloudKeyKind}`;
+export const SLOT_FILE_NAMES: Record<KeySlot, string> = {
+  ...KEY_FILE_NAMES,
+  'cloud-video': CLOUD_KEY_FILE_NAMES.video,
+  'cloud-image': CLOUD_KEY_FILE_NAMES.image,
+};
 /** 当前选用哪家(不是秘密,明文 JSON) */
 export const PROVIDER_FILE_NAME = 'llm-provider.json';
 
@@ -53,9 +67,9 @@ export class KeyStore {
     dir: string,
     private readonly cipher: Cipher,
     private readonly log: (msg: string) => void = console.warn,
-    readonly provider: LlmProvider = 'deepseek',
+    readonly slot: KeySlot = 'deepseek',
   ) {
-    this.file = join(dir, KEY_FILE_NAMES[provider]);
+    this.file = join(dir, SLOT_FILE_NAMES[slot]);
   }
 
   has(): boolean {
@@ -69,7 +83,7 @@ export class KeyStore {
       const key = this.cipher.decrypt(readFileSync(this.file));
       return normalizeKeyInput(key);
     } catch {
-      this.log(`[vidroom-desktop] ${KEY_FILE_NAMES[this.provider]} 解密失败(换了系统账户或文件损坏),当作没有配置 key`);
+      this.log(`[vidroom-desktop] ${SLOT_FILE_NAMES[this.slot]} 解密失败(换了系统账户或文件损坏),当作没有配置 key`);
       return null;
     }
   }

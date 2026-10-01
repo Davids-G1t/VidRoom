@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SESSION_COOKIE } from '../src/auth.js';
+import { CloudService } from '../src/cloud/service.js';
+import { VideoLibrary } from '../src/h3/library.js';
 import { NO_KEY_MESSAGE, startHost, type Host, type HostOptions } from '../src/server.js';
+import { SettingsStore } from '../src/settings.js';
 
 const webDir = mkdtempSync(join(tmpdir(), 'vidroom-web-'));
 writeFileSync(join(webDir, 'index.html'), '<!doctype html><title>VidRoom</title>');
@@ -99,7 +102,11 @@ describe('启动地址换 Cookie', () => {
     const cookie = await login(h);
     const status = await fetch(`${base(h)}/api/status`, { headers: { cookie } });
     expect(status.status).toBe(200);
-    expect(await status.json()).toEqual({ hasApiKey: false });
+    const body = await status.json();
+    expect(body.hasApiKey).toBe(false);
+    expect(body.forcedNoLocalGpu).toBe(false);
+    expect(body.cloud).toEqual({ video: false, image: false });
+    expect(typeof body.tier).toBe('string');
 
     const again = await fetch(h.launchUrl, { redirect: 'manual' });
     expect(again.status).toBe(403);

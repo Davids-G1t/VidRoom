@@ -63,6 +63,17 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 - 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,不碰真实权重、不需要真显卡,测试自己起本机假镜像)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
 - 已知问题:权重下载走 Node 的 `fetch`,默认不读系统代理环境变量;连不上 Hugging Face 时(常见于国内网络)要设 `NODE_USE_ENV_PROXY=1` 才会走代理,应用目前不会自动提示这一点,用户会看到下载失败但不知道原因——留给后续批次处理(比如下载失败时给出更明确的排障提示)。
 
+云端出片(BYOK,`apps/host/src/cloud/`):
+- 本机跑不动(显卡档位 `none`/`unsupported`)或用户明说要用云端时,助手调 `cloud_generate_video`(阿里云百炼、模型 `wan2.7-t2v`)或 `cloud_generate_image`(火山方舟、模型 `seedream-5-0-260128`)。
+- 花钱有闸:这两个工具**只算价钱,不发请求**;页面按工具产物渲染估价卡,用户点「确认生成(会计费)」才 POST `/api/cloud/generate`。请求必须带 `confirm: true`,少了它一律 400 —— 模型自己没有花钱的工具。
+- 价目(工具、估价卡、设置页共用一份,`cloud/pricing.ts`):生视频 720p ¥0.60/秒、1080p ¥1.00/秒(阿里云百炼官网华北2·北京价),生图 ¥0.22/张(火山方舟 Ark 价目页口径;另有页面作 ¥0.33,以 Ark 价目页为准)。
+- key:桌面版在设置页填,用 `safeStorage` 加密存 `cloud-video-key.enc` / `cloud-image-key.enc`,经 IPC 交给 Host,不进环境变量和命令行参数;命令行开发可用 `VIDROOM_CLOUD_VIDEO_KEY_FILE` / `VIDROOM_CLOUD_IMAGE_KEY_FILE`,接口地址用 `VIDROOM_CLOUD_VIDEO_BASE_URL` / `VIDROOM_CLOUD_IMAGE_BASE_URL` 换(测试用)。
+- 提示词会发给对应厂商,生成的内容归厂商服务条款管;云端生成的视频与生图进同一个作品库(生图存 `<数据目录>/images/`)。
+- 云端生成**不能存进工作流**:花钱那一步必须用户本人在估价卡上确认,`save_workflow` 的步骤表里没有云端工具。
+- 设置页的「不用本机显卡」开关把本机档位压成 `none`(`/api/status` 的 `tier`),云端没配 key 时首页会提示两件事一起看。
+- 测试:`pnpm test:e2e:cloud` —— 假 LLM,不碰真网络、不花一分钱,只验到「估价卡不出钱 / 确认门槛 / 档位开关」这几层。
+- 已知问题:**真 key 出片这条路没在开发机跑过**(要真 key 与真花钱),厂商接口的实际响应只按 AI SDK 文档写的;第一次用真 key 时注意看错误提示。
+
 工作流库(`apps/host/src/workflows/`,格式见 [docs/workflows.md](docs/workflows.md)):
 - 一个工作流就是数据目录里的 `<slug>/SKILL.md`:frontmatter 写 `name/title/description`,正文给人看,```workflow 围栏写窄 steps DSL。内置「默认工作流」在 Host 启动时物化到 `<数据目录>/workflows/topic-to-video/SKILL.md`,已有文件不覆盖。
 - 默认工作流:一句主题 → LLM 写文案和 3 个分镜 → `generate_video` 跑 3 段(每段 `seconds: 3`,即 73 帧)→ `concat_videos` 拼接 → `add_subtitle` 烧字幕。工作流 runner 复用聊天 agent 的 ai-sdk `tool()` 定义做参数校验,避免工具参数两处定义。
@@ -85,7 +96,7 @@ ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下�
 桌面版(`apps/desktop`):
 - 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。
 - Host 是主进程用 `ELECTRON_RUN_AS_NODE=1` fork 出来的子进程(复用 Electron 自带的 Node)。页面的 `/api` 请求由协议处理器带上 session cookie 转发给 Host,页面看不到启动地址和 cookie。
-- 设置页填的 key 用 Electron `safeStorage`(Windows 上走 DPAPI)加密,每家一个文件(`deepseek-key.enc`、`anthropic-key.enc`),选用哪家记在 `llm-provider.json`;启动时主进程解密当前那家的 key,经 fork 的 IPC 通道交给 Host,不进环境变量和命令行参数。页面只能「给某家设置新 key」「切换用哪家」和「问有没有 key」,拿不到明文也拿不到密文。
+- 设置页填的 key 用 Electron `safeStorage`(Windows 上走 DPAPI)加密,每家一个文件(`deepseek-key.enc`、`anthropic-key.enc`、云端两把 `cloud-video-key.enc` / `cloud-image-key.enc`),选用哪家记在 `llm-provider.json`;启动时主进程解密当前那家的 key 与云端 key,经 fork 的 IPC 通道交给 Host,不进环境变量和命令行参数。页面只能「给某家设置新 key」「切换用哪家」和「问有没有 key」,拿不到明文也拿不到密文。
 - 安装包带上 HyperFrames CLI 及其 node_modules(`resources/hyperframes`,打包前先 `pnpm hyperframes:install`),Host 以 `ELECTRON_RUN_AS_NODE=1` 的同一个可执行文件去跑它。
 - 关窗时有聊天请求在进行就先问;退出时连带结束 Host(Host 也会在父进程断开时自己退出)。
 - 安装包:未签名 NSIS,`oneClick: false`、`perMachine: false`,静默安装(`/S`)默认装进 `%LOCALAPPDATA%\Programs\VidRoom`,只写 HKCU。

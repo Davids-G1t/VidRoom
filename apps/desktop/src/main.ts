@@ -5,8 +5,9 @@ import { handleAppRequest } from './app-protocol.js';
 import { comfyUrlFromStatus } from './comfy-url.js';
 import { HostProcess } from './host-process.js';
 import { LLM_PROVIDERS, isLlmProvider, type LlmProvider } from '../../host/src/llm-provider.js';
-import { KeyStore, loadProvider, normalizeKeyInput, saveProvider } from './key-store.js';
-import { IPC, type KeyStatus, type OpenComfyResult, type SetKeyResult } from './ipc-channels.js';
+import type { CloudKeyKind } from '../../host/src/parent-ipc.js';
+import { CLOUD_KEY_FILE_NAMES, KeyStore, loadProvider, normalizeKeyInput, saveProvider } from './key-store.js';
+import { IPC, type CloudKeysStatus, type KeyStatus, type OpenComfyResult, type SetKeyResult } from './ipc-channels.js';
 import { APP_ENTRY_URL, APP_SCHEME, assertTrustedSender, isAppUrl } from './trust.js';
 
 // 只给自动化测试隔离用户数据目录用(Electron 自己没有对应的命令行参数)
@@ -33,9 +34,16 @@ const hostEnv: Record<string, string> = resourcesDir
   : {};
 const host = new HostProcess({ script: hostScript, webDir, env: hostEnv, log });
 let keyStores: Record<LlmProvider, KeyStore>;
+/** 云端两家(生视频 / 生图)的 key,与 LLM key 同一个存法 */
+let cloudKeyStores: Record<CloudKeyKind, KeyStore>;
 let userDataDir: string;
 
-/** 正在转发中的聊天请求数(出片在 generate_video 工具里跑,也算在聊天请求里) */
+/** 云端两家的 key(没配的是 null),给 Host 用 */
+function cloudKeys(): Record<CloudKeyKind, string | null> {
+  return { video: cloudKeyStores.video.load(), image: cloudKeyStores.image.load() };
+}
+
+/** 正在转发中的长请求数(聊天与云端生成;出片在 generate_video 工具里跑,也算在聊天请求里) */
 let chatsInFlight = 0;
 
 /** 有没有任务在跑:聊天请求挂着,或 Host 报告正在出片 */
@@ -93,6 +101,22 @@ function registerIpc(): void {
     if (!isLlmProvider(rawProvider)) return { ok: false, message: '不认识的 LLM 提供方。' };
     saveProvider(userDataDir, rawProvider);
     await host.setKey(rawProvider, keyStores[rawProvider].load());
+    return { ok: true };
+  });
+
+  // 云端两家:问配没配、存一份新的(存完立刻交给 Host,不用重启)
+  handleTrusted(IPC.cloudKeyStatus, (): CloudKeysStatus => ({
+    video: cloudKeyStores.video.has(),
+    image: cloudKeyStores.image.has(),
+  }));
+
+  handleTrusted(IPC.setCloudKey, async (_event, raw, rawKind): Promise<SetKeyResult> => {
+    if (rawKind !== 'video' && rawKind !== 'image') return { ok: false, message: '不认识的云端服务。' };
+    const key = normalizeKeyInput(raw);
+    if (key === null) return { ok: false, message: 'key 格式不对:不能为空,不能含空格或换行。' };
+    if (!encryptionUsable()) return { ok: false, message: '本机系统加密存储不可用,不能安全保存 key。' };
+    cloudKeyStores[rawKind].save(key);
+    await host.setCloudKeys(cloudKeys());
     return { ok: true };
   });
 
@@ -207,12 +231,16 @@ app.whenReady().then(async () => {
     decrypt: (data: Buffer) => safeStorage.decryptString(data),
   };
   keyStores = Object.fromEntries(LLM_PROVIDERS.map((p) => [p, new KeyStore(userDataDir, cipher, log, p)])) as Record<LlmProvider, KeyStore>;
+  cloudKeyStores = {
+    video: new KeyStore(userDataDir, cipher, log, 'cloud-video'),
+    image: new KeyStore(userDataDir, cipher, log, 'cloud-image'),
+  };
 
   protocol.handle(APP_SCHEME, (request) =>
     handleAppRequest(request, {
       webDir,
       forwardApi: async (path, init) => {
-        const isChat = path.startsWith('/api/chat') && init.method === 'POST';
+        const isChat = (path.startsWith('/api/chat') || path.startsWith('/api/cloud/generate')) && init.method === 'POST';
         if (isChat) chatsInFlight += 1;
         try {
           return await host.fetchApi(path, init);
@@ -226,7 +254,7 @@ app.whenReady().then(async () => {
   registerIpc();
   setupMenu();
   const provider = loadProvider(userDataDir);
-  await host.start(provider, keyStores[provider].load());
+  await host.start(provider, keyStores[provider].load(), cloudKeys());
   createWindow();
 }).catch((err) => {
   console.error('[vidroom-desktop] 启动失败:', err instanceof Error ? err.message : String(err));

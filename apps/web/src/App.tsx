@@ -13,6 +13,7 @@ import {
   type VideoRecord,
 } from './api';
 import { ComfyPanel } from './ComfyPanel';
+import { CloudConfirm, cloudEstimates } from './CloudConfirm';
 import { desktopApi } from './desktop';
 import { H3Panel } from './H3Panel';
 import { Settings } from './Settings';
@@ -66,6 +67,13 @@ export function App() {
 
   const hasKey = status?.kind === 'ok' && status.hasApiKey;
   const noKey = status?.kind === 'ok' && !status.hasApiKey;
+  // 本机跑不动(没 N 卡或显存太小)而且云端也没配 key —— 提示他去填云端 key
+  const cloudHint =
+    status?.kind === 'ok' &&
+    (status.tier === 'none' || status.tier === 'unsupported') &&
+    status.cloud?.video !== true &&
+    status.cloud?.image !== true;
+  const refreshVideos = () => void fetchVideos().then(setVideos);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -133,6 +141,12 @@ export function App() {
         </div>
       )}
 
+      {cloudHint && (
+        <div className="banner" role="alert" data-testid="cloud-hint">
+          本机出不了片(档位 {status?.kind === 'ok' ? status.tier : ''})。去设置里填云端 key,就能用云端生成。
+        </div>
+      )}
+
       {settingsOpen && (
         <Settings onSaved={() => fetchStatus().then(setStatus)} onClose={() => setSettingsOpen(false)} />
       )}
@@ -162,6 +176,9 @@ export function App() {
                 <summary>调用了工具:{m.toolCalls.map((t) => t.toolName).join('、')}</summary>
                 <pre>{JSON.stringify(m.toolCalls, null, 2)}</pre>
               </details>
+            )}
+            {m.role === 'assistant' && (
+              <CloudConfirm estimates={cloudEstimates(m.toolCalls)} onNotice={setNotice} onVideosChanged={refreshVideos} />
             )}
           </div>
         ))}

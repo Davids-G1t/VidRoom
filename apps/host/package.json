@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",
+    "@ai-sdk/alibaba": "^2.0.60",
     "@ai-sdk/anthropic": "^4.0.70",
+    "@ai-sdk/bytedance": "^2.0.56",
     "@ai-sdk/deepseek": "^3.0.57",
     "ai": "^7.0.123",
     "zod": "^4.6.5"

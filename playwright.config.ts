@@ -24,5 +24,7 @@ export default defineConfig({
     { name: 'motion', testMatch: /motion\.spec\.ts/ },
     // 工作流库:假 LLM + 假 ComfyUI 回放,真浏览器点默认/自定义工作流;本机跑
     { name: 'workflow', testMatch: /workflow\.spec\.ts/ },
+    // 云端生成(BYOK):假 LLM,只验到「估价不花钱 + 确认门槛 + 档位开关」;不碰真网络,本机与 CI 都跑
+    { name: 'cloud', testMatch: /cloud\.spec\.ts/ },
   ],
 });

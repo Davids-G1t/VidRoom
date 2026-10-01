@@ -2,12 +2,13 @@ import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createModel } from './agent.js';
+import { CloudService } from './cloud/service.js';
 import { PROVIDER_LABELS, type LlmProvider } from './llm-provider.js';
 import { dataDir } from './comfyui/install.js';
 import { ComfyManager, defaultMemoryLimitMiB, parseExtraArgs } from './comfyui/manager.js';
 import { VideoEditor } from './ffmpeg/editor.js';
 import { ensureFfmpeg } from './ffmpeg/install.js';
-import { probeGpu } from './gpu.js';
+import { probeGpu, withForcedTier } from './gpu.js';
 import { ConsentStore } from './h3/license.js';
 import { VideoLibrary } from './h3/library.js';
 import { ModelStore, h3ModelFiles, modelsDir, writeExtraModelPaths } from './h3/models.js';
@@ -17,6 +18,7 @@ import { ensureBrowser } from './motion/browser.js';
 import { MotionService } from './motion/service.js';
 import { parseParentMessage, type HostToParent } from './parent-ipc.js';
 import { startHost } from './server.js';
+import { SettingsStore } from './settings.js';
 import { WorkflowService } from './workflows/service.js';
 
 const webDir = process.env.VIDROOM_WEB_DIR ?? fileURLToPath(new URL('../../web/dist', import.meta.url));
@@ -38,7 +40,7 @@ const video = new VideoService({
   models: new ModelStore(models, join(data, 'cache', 'model-sha256.json'), h3ModelFiles()),
   consent: new ConsentStore(join(data, 'h3-consent.json')),
   library,
-  probeGpu: () => probeGpu(),
+  probeGpu: async () => withForcedTier(await probeGpu(), settings.get().forceNoLocalGpu),
 });
 // ffmpeg 第一次剪辑时才按清单下载(LGPL 构建);临时文件放数据目录,不用系统临时目录
 const editor = new VideoEditor({
@@ -58,6 +60,9 @@ const motion = new MotionService({
   log: (m) => console.log(m),
 });
 const workflows = new WorkflowService(join(data, 'workflows'), null, { video, editor, motion });
+// 云端生成(BYOK):key 从桌面壳的 IPC 或环境变量指向的文件来;用户设置(目前只有档位开关)存数据目录
+const settings = new SettingsStore(data);
+const cloud = new CloudService({ dataDir: data, library, log: (m) => console.log(m) });
 
 const modelFor = (provider: LlmProvider, apiKey: string | null) =>
   apiKey ? createModel(provider, apiKey, process.env[BASE_URL_ENVS[provider]] || undefined) : null;
@@ -72,6 +77,9 @@ const modelFor = (provider: LlmProvider, apiKey: string | null) =>
 if (process.send) {
   const send = (msg: HostToParent) => process.send!(msg);
   let host: Awaited<ReturnType<typeof startHost>> | null = null;
+  let llmKey: string | null = null;
+  /** 日志与错误信息里要抹掉的秘密:LLM key + 两把云端 key(云端 key 变了也要重新算) */
+  const allSecrets = (): string[] => [llmKey, ...cloud.configuredKeys()].filter((k): k is string => k !== null);
 
   const handle = async (raw: unknown) => {
     const msg = parseParentMessage(raw);
@@ -79,15 +87,22 @@ if (process.send) {
       console.error('[vidroom] 忽略格式不对的父进程消息');
       return;
     }
-    const secrets = msg.apiKey ? [msg.apiKey] : [];
+    // 云端 key 与 LLM key 各自独立到达:先到的先记下,服务起了就只换「要抹掉的秘密」
+    if (msg.type === 'set-cloud-keys') {
+      cloud.setKeys(msg.keys);
+      host?.setSecrets(allSecrets());
+      send({ type: 'cloud-keys-applied' });
+      return;
+    }
+    llmKey = msg.apiKey;
     const nextModel = modelFor(msg.provider, msg.apiKey);
     workflows.setModel(nextModel);
     if (host === null) {
       // 第一条 set-key 到了才起服务,页面第一次查状态时 key 已就位
-      host = await startHost({ model: nextModel, webDir, port, secrets, comfy, video, editor, motion, workflows });
+      host = await startHost({ model: nextModel, webDir, port, secrets: allSecrets(), comfy, video, editor, motion, workflows, cloud, settings });
       send({ type: 'ready', launchUrl: host.launchUrl });
     } else {
-      host.setModel(nextModel, secrets);
+      host.setModel(nextModel, allSecrets());
     }
     send({ type: 'key-applied', hasApiKey: msg.apiKey !== null });
   };
@@ -115,10 +130,25 @@ if (process.send) {
   const apiKey = loadKey(provider);
   const initialModel = modelFor(provider, apiKey);
   workflows.setModel(initialModel);
-  const host = await startHost({ model: initialModel, webDir, port, secrets: apiKey ? [apiKey] : [], comfy, video, editor, motion, workflows });
+  const host = await startHost({
+    model: initialModel,
+    webDir,
+    port,
+    secrets: [...(apiKey ? [apiKey] : []), ...cloud.configuredKeys()],
+    comfy,
+    video,
+    editor,
+    motion,
+    workflows,
+    cloud,
+    settings,
+  });
 
   if (!apiKey) {
     console.log(`[vidroom] 没有配置 ${PROVIDER_LABELS[provider]} API key(环境变量 ${KEY_FILE_ENVS[provider]} 未设置或文件不存在),聊天功能不可用。`);
+  }
+  if (cloud.configuredKeys().length === 0) {
+    console.log('[vidroom] 云端生成未配置 key(VIDROOM_CLOUD_VIDEO_KEY_FILE / VIDROOM_CLOUD_IMAGE_KEY_FILE),聊天里只能用本地出片。');
   }
   console.log(`[vidroom] 启动地址(只能用一次): ${host.launchUrl}`);
 

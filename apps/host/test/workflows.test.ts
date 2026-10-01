@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_WORKFLOW_SKILL } from '../src/workflows/default.js';
 import { WorkflowNoKeyError, WorkflowRunner } from '../src/workflows/runner.js';
 import { WorkflowService } from '../src/workflows/service.js';
-import { parseSkill, workflowToSkillSource } from '../src/workflows/skill.js';
+import { parseSkill, workflowToSkillSource, WORKFLOW_TOOLS, WorkflowStepSchema } from '../src/workflows/skill.js';
 
 const usage = {
   inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
@@ -46,6 +46,13 @@ describe('工作流 SKILL.md', () => {
   it('缺 frontmatter 或坏 steps 会报错', () => {
     expect(() => parseSkill('# no front')).toThrow(/frontmatter/);
     expect(() => parseSkill('---\nname: bad\ntitle: 坏\ndescription: 坏\n---\n```workflow\nnope:\n```')).toThrow(/steps/);
+  });
+
+  it('云端步骤不在工作流 DSL 里(花钱那一步必须用户本人确认)', () => {
+    expect(WORKFLOW_TOOLS).not.toContain('cloud_generate_video');
+    expect(WORKFLOW_TOOLS).not.toContain('cloud_generate_image');
+    expect(() => WorkflowStepSchema.parse({ id: 'shot', tool: 'cloud_generate_video', args: { prompt: '猫' } })).toThrow();
+    expect(() => parseSkill('---\nname: bad\ntitle: 坏\ndescription: 坏\n---\n```workflow\nstep:\n  tool: cloud_generate_video\n```')).toThrow();
   });
 });
 

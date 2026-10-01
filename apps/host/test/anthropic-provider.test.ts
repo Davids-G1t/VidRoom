@@ -133,7 +133,7 @@ describe('命令行起 Host:VIDROOM_LLM_PROVIDER=anthropic 时聊天请求到 An
     const res = await fetch(launchUrl, { redirect: 'manual' });
     const cookie = (res.headers.get('set-cookie') ?? '').split(';')[0];
     const origin = new URL(launchUrl).origin;
-    expect(await (await fetch(`${origin}/api/status`, { headers: { cookie } })).json()).toEqual({ hasApiKey: true });
+    expect((await (await fetch(`${origin}/api/status`, { headers: { cookie } })).json()) as { hasApiKey: boolean }).toMatchObject({ hasApiKey: true });
 
     // 这里只核对请求去了哪、带了什么 key(不触发渲染)—— 真渲染在 e2e 里测
     const chat = await fetch(`${origin}/api/chat`, {

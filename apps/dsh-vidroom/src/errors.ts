@@ -10,6 +10,8 @@ export type VidroomErrorCode =
   | 'PROJECT_INVALID'
   | 'PROJECT_NOT_FOUND'
   | 'PROJECT_HASH_MISMATCH'
+  /** 这条工程正被另一个写者占着(锁文件被人占着、手里的锁被删/被替、旧锁不自动清),或锁内复核连撞多次(工程被别人绕过锁改了):换个时机再写。报错里只有「占位等到超时」那一路带锁路径与来路(确认没人在写才可手删那个锁文件);其余情形不许删锁。 */
+  | 'PROJECT_BUSY'
   | 'PLAN_HASH_MISMATCH'
   | 'WORKFLOW_MISMATCH'
   /** 盘上权重与工程 `locks.models` 记的对不上(换了权重就是换了环境,结果不可比)。 */

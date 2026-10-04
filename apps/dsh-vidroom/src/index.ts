@@ -25,7 +25,7 @@ export { parseSkill, listWorkflows } from './library.js';
 export { runWorkflow } from './runner.js';
 export { createVidroomRuntime } from './runtime.js';
 export { registerVidroomProjectTools } from './project-tools.js';
-export { readProject, writeProject, applyPatch } from './project-io.js';
+export { readProject, applyPatch } from './project-io.js';
 export { buildPlan } from './plan.js';
 export { renderProject } from './render.js';
 

@@ -210,14 +210,14 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
       if (action !== 'patch') {
         throw new VidroomError('PROJECT_INVALID', `action 只能是 inspect / patch / create(收到 ${action})`);
       }
-      const result = patchProject(dir, current, { baseHash: optStr(args, 'baseHash'), patch: patchOf(args) });
+      const result = patchProject(dir, { baseHash: optStr(args, 'baseHash'), patch: patchOf(args) });
       const view = inspectProject(dir, result.project);
       return {
         ...view,
         changedPaths: result.changedPaths,
         invalidatedShotIds: result.invalidatedShotIds,
         alignmentRequired: result.alignmentRequired,
-        previousHash: projectHash(current),
+        previousHash: result.previousHash,
         summary: [
           `工程已改:${result.changedPaths.join(', ')}`,
           result.invalidatedShotIds.length === 0
@@ -328,7 +328,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
           endFrame: Math.trunc(Number(window.endFrame)),
         }),
       );
-      const view = alignSegment(dir, current, {
+      const view = alignSegment(dir, {
         segmentId: str(args, 'segmentId'),
         assetId: str(args, 'assetId'),
         audioHash: str(args, 'audioHash'),

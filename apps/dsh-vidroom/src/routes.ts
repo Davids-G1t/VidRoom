@@ -130,6 +130,10 @@ function statusFor(error: unknown): number {
       return 404;
     case 'ALREADY_RUNNING':
       return 409;
+    case 'PROJECT_BUSY':
+      // 写冲突或锁状态异常(锁在别的写者手里、手里的锁被删/被替、上次崩了留下的旧锁不会自动清):
+      // 重试可能就好了,但不是请求写错了。
+      return 409;
     case 'LOCAL_ONLY':
     case 'REFERENCE_LOCAL_REQUIRED':
       return 403;
@@ -275,12 +279,11 @@ function projectHandlers(
             }
             if (action !== 'patch') throw new VidroomError('PROJECT_INVALID', `action 只能是 inspect/patch/create`);
             const dir = projectDirOf(strField(body, 'path'));
-            const current = readProject(dir);
             const patch = body.patch;
             if (!Array.isArray(patch) || patch.length === 0) {
               throw new VidroomError('PROJECT_INVALID', 'patch 要是非空数组');
             }
-            const result = patchProject(dir, current, {
+            const result = patchProject(dir, {
               baseHash: typeof body.baseHash === 'string' ? body.baseHash : undefined,
               patch: patch as PatchOp[],
             });
@@ -387,9 +390,8 @@ function projectHandlers(
         void guarded(response, async () => {
           const body = (await readJsonBody(request)) as Record<string, unknown>;
           const dir = projectDirOf(strField(body, 'path'));
-          const project = readProject(dir);
           const windows = Array.isArray(body.wordWindows) ? body.wordWindows : [];
-          const view = alignSegment(dir, project, {
+          const view = alignSegment(dir, {
             segmentId: strField(body, 'segmentId'),
             assetId: strField(body, 'assetId'),
             audioHash: strField(body, 'audioHash'),

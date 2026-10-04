@@ -16,7 +16,7 @@ import { mediaTools } from './config.js';
 import { VidroomError, errorFacts, type VidroomErrorCode } from './errors.js';
 import { sha256File, toolVersion, type MediaTools } from './media.js';
 import { assertPlanHash, buildPlan, readReceipts, requestFor, type NewRequest, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, ensureDir, importAsset, nextId, readProject, writeProject } from './project-io.js';
+import { applyPatch, ensureDir, importAsset, nextId, readProject, updateProject } from './project-io.js';
 import { H3_FPS } from './frames.js';
 import { projectHash, type Budget, type Candidate, type PatchOp, type Project } from './project.js';
 import { RunStore, newRunId, type Receipt, type RunMode, type RunShot } from './receipts.js';
@@ -468,29 +468,32 @@ async function runCandidates(
       store.log(runId, `变体运行:新候选留在本 run 快照里,工程(新哈希 ${hashAfter.slice(0, 12)})不回写`);
     } else {
       // 生成是分钟级的,这期间别人可能已经 patch 过、导过素材、选过候选:
-      // 重读当前工程,只把我们这一跑新加的并进去。拿开工时那份整份覆盖会把这些抹掉。
-      const latest = readProject(ctx.request.dir);
-      const merged = mergeGenerated(latest, working, { candidateIds: newCandidateIds, startAssetIds });
-      working = merged.project;
-      writeProject(ctx.request.dir, working);
+      // 重读当前工程,只把我们这一跑新加的并进去(updateProject 收尾前再复核一次哈希)。
+      // 拿开工时那份整份覆盖会把这些抹掉。
+      let idMap = new Map<string, string>();
+      working = updateProject(ctx.request.dir, (latest) => {
+        const merged = mergeGenerated(latest, working, { candidateIds: newCandidateIds, startAssetIds });
+        idMap = merged.idMap;
+        return merged.project;
+      });
       hashAfter = projectHash(working);
-      if (merged.idMap.size > 0) {
+      if (idMap.size > 0) {
         // 你跑的时候面板手工登记过候选,占掉了同一个 `cand-N`:上面换了 id,回执与返回值得一起跟上。
         for (const [index, id] of newCandidateIds.entries()) {
-          const mapped = merged.idMap.get(id);
+          const mapped = idMap.get(id);
           if (mapped !== undefined) newCandidateIds[index] = mapped;
         }
         shots.splice(
           0,
           shots.length,
           ...shots.map((shot) =>
-            shot.candidateId === undefined ? shot : { ...shot, candidateId: merged.idMap.get(shot.candidateId) ?? shot.candidateId },
+            shot.candidateId === undefined ? shot : { ...shot, candidateId: idMap.get(shot.candidateId) ?? shot.candidateId },
           ),
         );
         receipt = store.update(runId, { shots });
         store.log(
           runId,
-          `候选 id 撞车,已换新:${[...merged.idMap].map(([from, to]) => `${from}→${to}`).join('、')}(回执与返回值同步跟上)`,
+          `候选 id 撞车,已换新:${[...idMap].map(([from, to]) => `${from}→${to}`).join('、')}(回执与返回值同步跟上)`,
         );
       }
       store.log(runId, `工程已登记 ${newCandidateIds.length} 个新候选,新哈希 ${hashAfter.slice(0, 12)}`);

@@ -11,8 +11,8 @@
  * 反向验证过:把 `startRender` 里的 compose 分支改成走 H3、或让 planProject 在 plan 阶段
  * 就 queue,上面那两组「提交数 = 0」的断言就会红。
  */
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -21,10 +21,12 @@ import { createVidroomRuntime } from '../src/runtime.js';
 import { apply } from '../src/index.js';
 import { framesForSeconds } from '../src/frames.js';
 import { mountVidroomRoutes } from '../src/routes.js';
+import { DEFAULT_PATCH_EXAMPLE } from '../src/client/project-panel.tsx';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
-import { readProject, importAsset } from '../src/project-io.js';
-import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl } from '../src/project-ops.js';
+import { readProject, importAsset, lockFileOf, projectFileOf, updateProject, withProjectLock, writeProject } from '../src/project-io.js';
+import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl, importProjectAsset } from '../src/project-ops.js';
+import { readConfig } from '../src/config.js';
 import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
 import { assertSupported, h3Capabilities } from '../src/adapter.js';
 import { startFakeComfy } from './support/fake-comfy.js';
@@ -137,7 +139,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
 
       // ② 参考片只给分析草稿,不给时间轴:通过工具的 patch 入口把镜头与合成时钟写进工程。
       // 这里故意不直接写文件 —— 直接写就证明不了「工具面能建工程」(那是本轮审查抓的 P1)。
-      const added = patchProject(projectDir, stored, {
+      const added = patchProject(projectDir, {
         baseHash: projectHash(stored),
         patch: [
           {
@@ -610,7 +612,9 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       },
       alignments: [],
     };
-    const aligned = alignSegment(projectDir, voiced, {
+    // 工程得先在盘上(alignSegment 在锁里重读那份):把这份夹具落盘再对齐。
+    writeProject(projectDir, voiced);
+    const aligned = alignSegment(projectDir, {
       segmentId: 'seg-1',
       assetId: audioAsset.id,
       audioHash: audioAsset.sha256,
@@ -635,7 +639,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
     // 删掉被锚定的词 → 当场 ALIGNMENT_REQUIRED(不静默拆锚、也不拿旧时间窗顶;验收 2)。
     const removalCode = ((): string | null => {
       try {
-        patchProject(projectDir, again, { patch: [{ op: 'remove', path: 'script.tokens[tk-2]' }] });
+        patchProject(projectDir, { patch: [{ op: 'remove', path: 'script.tokens[tk-2]' }] });
         return null;
       } catch (error: unknown) {
         return errorCode(error);
@@ -821,7 +825,9 @@ describe('本地音轨(audio.mode)', () => {
       alignments: [],
       shots: project.shots.map((shot) => ({ ...shot, segmentId: 'seg-1' })),
     };
-    alignSegment(projectDir, voiced, {
+    // 工程得先在盘上(alignSegment 在锁里重读那份):把这份夹具落盘再对齐。
+    writeProject(projectDir, voiced);
+    alignSegment(projectDir, {
       segmentId: 'seg-1',
       assetId: audioAsset.id,
       audioHash: audioAsset.sha256,
@@ -1072,7 +1078,9 @@ describe('第二轮审查边界(旧行为会失败的那些)', () => {
       alignments: [],
       shots: project.shots.map((shot) => ({ ...shot, segmentId: 'seg-1' })),
     };
-    alignSegment(projectDir, voiced, {
+    // 工程得先在盘上(alignSegment 在锁里重读那份):把这份夹具落盘再对齐。
+    writeProject(projectDir, voiced);
+    alignSegment(projectDir, {
       segmentId: 'seg-1',
       assetId: audioAsset.id,
       audioHash: audioAsset.sha256,
@@ -1157,7 +1165,7 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
     try {
       // 先把配方改掉(夹具候选是旧配方):计划里这才真有一条新请求,否则 plan 直接复用,根本没得回写。
       const seeded = readProject(projectDir);
-      patchProject(projectDir, seeded, {
+      patchProject(projectDir, {
         baseHash: projectHash(seeded),
         patch: [{ op: 'replace', path: 'shots[0].generation.seed', value: 2024 }],
       });
@@ -1170,7 +1178,7 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
       });
       // 生成还在跑:这会儿改工程。旧实现拿开工时那份整份回写,这一改就被抹掉了。
       const mid = readProject(projectDir);
-      patchProject(projectDir, mid, {
+      patchProject(projectDir, {
         baseHash: projectHash(mid),
         patch: [{ op: 'replace', path: 'shots[0].generation.prompt', value: '生成期间改过的提示词' }],
       });
@@ -1198,7 +1206,7 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
     const seeded = readProject(projectDir);
     const shot1 = seeded.shots[0]!;
     const newGeneration = { ...shot1.generation, prompt: '同配方新提示词', seed: 4242 };
-    patchProject(projectDir, seeded, {
+    patchProject(projectDir, {
       baseHash: projectHash(seeded),
       patch: [
         { op: 'replace', path: 'shots[0].generation.prompt', value: '同配方新提示词' },
@@ -1289,7 +1297,29 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
       });
       // 旧行为:startRender 阻塞到跑完,这里已经是 succeeded(异步轮询的承诺是假的)。
       expect(['queued', 'running']).toContain(jobView(projectDir, started.runId).receipt?.state);
+      // 验收 3 的「单卡并发峰值 = 1」:同一条工程还在跑时再点一次,当场拒。
+      const again = await startRender(runtime, {
+        dir: projectDir,
+        mode: 'generate-missing',
+        planHash: plan.planHash,
+      }).catch((error: unknown) => error);
+      expect(errorCode(again)).toBe('ALREADY_RUNNING');
       expect(await waitForRun(projectDir, started.runId)).not.toBe('running');
+      // 跑完了锁要放掉,不然这条工程以后再也开不了(终态写盘与 finally 放锁差一拍,这里轮询等)。
+      // 故意传个假 planHash:放锁证据是「不再报 ALREADY_RUNNING、改报哈希对不上」,
+      // 顺便避开「轮询成功就真开了一条没人等的 run」这个坑。
+      const deadline = Date.now() + 2_000;
+      let releasedCode = 'ALREADY_RUNNING';
+      while (releasedCode === 'ALREADY_RUNNING' && Date.now() < deadline) {
+        const retry = await startRender(runtime, {
+          dir: projectDir,
+          mode: 'generate-missing',
+          planHash: 'sha256:' + '0'.repeat(64),
+        }).catch((error: unknown) => error);
+        releasedCode = errorCode(retry);
+        if (releasedCode === 'ALREADY_RUNNING') await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(releasedCode).toBe('PLAN_HASH_MISMATCH');
     } finally {
       await comfy.close();
     }
@@ -1372,7 +1402,7 @@ describe('第四轮审查的回归(旧行为必须失败)', () => {
     try {
       // 先把配方改掉(夹具候选是旧配方),不然 plan 直接复用、根本没有回写这一步。
       const seeded = readProject(projectDir);
-      patchProject(projectDir, seeded, {
+      patchProject(projectDir, {
         baseHash: projectHash(seeded),
         patch: [{ op: 'replace', path: 'shots[0].generation.seed', value: 777 }],
       });
@@ -1469,4 +1499,376 @@ describe('第四轮审查的回归(旧行为必须失败)', () => {
     expect(codeOf(() => assertRecordedUrl('data:text/plain,hi'))).toBe('PROJECT_INVALID');
     expect(codeOf(() => assertRecordedUrl('随便写的'))).toBe('PROJECT_INVALID');
   });
+});
+
+describe('第五轮(合后自查)的回归', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-fix5-'));
+
+  maybe('导入素材期间别人改了工程:那条改动不被导入的旧快照盖掉', async () => {
+    const projectDir = join(dir, 'project-import-race');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    const incoming = join(dir, 'clip-import-race.mp4');
+    await makeClip(incoming, { frames: 12, color: 'orange' });
+
+    const config = readConfig({ ffmpegPath: TOOLS.ffmpegPath, ffprobePath: TOOLS.ffprobePath });
+    // 导入里会 await(算 sha256 + 跑探针):不等它,趁这段时间改一次工程。
+    // 旧行为(f5ec4d9 之前)是拿开工时那份整份回写,这句提示词连人带改动一起被盖回去。
+    // f5ec4d9 已改成收尾重读;本 PR 再把收尾换成 `updateProject`(带乐观哈希复核)。这条用例把它钉住。
+    const importing = importProjectAsset(config, projectDir, { sourcePath: incoming, kind: 'video' });
+    const mid = readProject(projectDir);
+    patchProject(projectDir, {
+      baseHash: projectHash(mid),
+      patch: [{ op: 'replace', path: 'shots[0].generation.prompt', value: '导入期间改过的提示词' }],
+    });
+    const { asset } = await importing;
+
+    const after = readProject(projectDir);
+    expect(after.assets.some((item) => item.id === asset.id)).toBe(true);
+    expect(after.shots[0]!.generation.prompt).toBe('导入期间改过的提示词');
+  }, 60_000);
+
+  maybe('两条导入同时跑:两份资产都进工程,后收尾的不把先收尾的盖掉', async () => {
+    const projectDir = join(dir, 'project-import-parallel');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    const first = join(dir, 'clip-p1.mp4');
+    const second = join(dir, 'clip-p2.mp4');
+    await makeClip(first, { frames: 10, color: 'red' });
+    await makeClip(second, { frames: 10, color: 'blue' });
+
+    // 两条不 await 地同时发:中间的哈希+探针会让出事件循环,两边都拿同一份旧快照开头。
+    const config = readConfig({ ffmpegPath: TOOLS.ffmpegPath, ffprobePath: TOOLS.ffprobePath });
+    const [one, two] = await Promise.all([
+      importProjectAsset(config, projectDir, { sourcePath: first, kind: 'video' }),
+      importProjectAsset(config, projectDir, { sourcePath: second, kind: 'video' }),
+    ]);
+
+    const after = readProject(projectDir);
+    const ids = after.assets.map((item) => item.id);
+    expect(ids).toContain(one.asset.id);
+    expect(ids).toContain(two.asset.id);
+    expect(one.asset.id).not.toBe(two.asset.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  }, 60_000);
+
+  maybe('updateProject:合并期间工程被从别处改了 → 复核发现后重来,不静默覆盖', async () => {
+    const projectDir = join(dir, 'project-update-retry');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    let calls = 0;
+    const merged = updateProject(projectDir, (current) => {
+      calls += 1;
+      // 第一次合并时,假装别人在「读出这份工程 → 写回」之间插了一手(改了种子)。
+      if (calls === 1) {
+        writeProject(projectDir, {
+          ...current,
+          revision: current.revision + 1,
+          parentHash: projectHash(current),
+          shots: current.shots.map((shot) => ({ ...shot, generation: { ...shot.generation, seed: 999 } })),
+        });
+      }
+      return {
+        ...current,
+        revision: current.revision + 1,
+        parentHash: projectHash(current),
+        shots: current.shots.map((shot) => ({ ...shot, generation: { ...shot.generation, prompt: '合并写的提示词' } })),
+      };
+    });
+
+    // 旧行为(读一次写一次):调一次就落盘,别处那次的改动静静地没了,也不会重来。
+    expect(calls).toBe(2);
+    // 别处的改动是被第二次合并读进来、写下去,不是被覆盖。
+    expect(merged.shots[0]!.generation.seed).toBe(999);
+    expect(merged.shots[0]!.generation.prompt).toBe('合并写的提示词');
+    const after = readProject(projectDir);
+    expect(after.shots[0]!.generation.seed).toBe(999);
+    expect(after.shots[0]!.generation.prompt).toBe('合并写的提示词');
+  }, 60_000);
+
+  maybe('updateProject:每次都被别处改掉 → 撞满就抛 PROJECT_BUSY,不无限重试', async () => {
+    const projectDir = join(dir, 'project-update-busy');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    let calls = 0;
+    const boom = (): string => {
+      try {
+        updateProject(projectDir, (current) => {
+          calls += 1;
+          writeProject(projectDir, {
+            ...current,
+            revision: current.revision + 1,
+            parentHash: projectHash(current),
+            shots: current.shots.map((shot) => ({ ...shot, generation: { ...shot.generation, seed: calls } })),
+          });
+          return { ...current, revision: current.revision + 1, parentHash: projectHash(current) };
+        });
+        return '没报错';
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    };
+
+    expect(boom()).toBe('PROJECT_BUSY');
+    // 有上限:撞这么多次就不是运气差,该让人看一眼,而不是转到天荒地老。
+    expect(calls).toBeGreaterThan(1);
+  }, 60_000);
+
+  maybe('面板「改工程」的默认示例当场能应用(不变量:用户点「应用改动」第一个跑的就是它)', async () => {
+    const projectDir = join(dir, 'project-default-patch');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    const example = JSON.parse(DEFAULT_PATCH_EXAMPLE) as PatchOp[];
+    const patched = patchProject(projectDir, {
+      baseHash: projectHash(readProject(projectDir)),
+      patch: example,
+    });
+    expect(patched.project.shots[0]!.generation.prompt).toBe('改成你要的画面描述');
+  }, 60_000);
+});
+
+/**
+ * 写锁(第六轮审查的回归):工程写者不止一个进程 —— dsh 容器里的面板、机器人进程里的 CLI、
+ * 面板拉起的渲染回写都会写同一条工程。「锁内读-改-写」是这层的互斥,旧行为(没锁)下
+ * 两个进程可以同时进「读 → 算 → 写」,后写的把先写的整份盖掉。
+ *
+ * 这几条不用 ffmpeg(夹具是空工程),所以是 `it` 不是 `maybe`:没装 ffmpeg 也得跑。
+ */
+describe('工程写锁(跨进程互斥)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-lock-'));
+
+  /** 一条只有 id 的空工程:这几条盯的是写锁,不需要媒体。 */
+  function seedProject(name: string): string {
+    const projectDir = join(dir, name);
+    writeProject(projectDir, emptyProject(name));
+    return projectDir;
+  }
+
+  /**
+   * 找一个真正没在跑的 pid:起个空进程、等它退掉,它用过的那个 pid 刚变成死的。
+   * (不抚一个「看着像空号」的区间 —— 那要赌这台机器上没有别的进程占着。)
+   */
+  function deadPid(): number {
+    const ghost = spawnSync(process.execPath, ['-e', '']);
+    const pid = ghost.pid;
+    if (typeof pid === 'number' && pid > 0) {
+      try {
+        process.kill(pid, 0);
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+      }
+    }
+    throw new Error('连一个刚死过的 pid 都拿不到');
+  }
+
+  it('锁被别的进程占着(新锁)→ 等到超时抛 PROJECT_BUSY,不静默写', () => {
+    const projectDir = seedProject('project-locked');
+    // 冒充另一个活着的写者:锁文件在、年龄是新的(没到废锁线,不许抢)。
+    writeFileSync(lockFileOf(projectDir), `other-process-token ${process.pid}\n`);
+    const before = readProject(projectDir);
+
+    const code = ((): string | null => {
+      try {
+        updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+    expect(code).toBe('PROJECT_BUSY');
+    // 拒了就是一点都没写:revision 还是那份(旧行为会照写不误)。
+    expect(readProject(projectDir).revision).toBe(before.revision);
+    // 别人的锁还在(没被顺手删掉)。
+    expect(existsSync(lockFileOf(projectDir))).toBe(true);
+  }, 30_000);
+
+  it('新建工程那两条路也认手:锁在落盘前被替掉 → 不落盘(PROJECT_BUSY)', () => {
+    // 新建的空白工程与首次登记的参考片,是仅有的两条直接调 writeProject 的路:
+    // 它们写之前也得先认一次手,不然上面那条 assertOwned 就只管住了 updateProject 那一半。
+    const dir = join(mkdtempSync(join(tmpdir(), 'vr-')), 'project-seed-guard');
+    mkdirSync(dir, { recursive: true });
+
+    const code = ((): string | null => {
+      try {
+        withProjectLock(dir, (assertOwned) => {
+          // 冒充另一个进程:落盘前把锁换成它的令牌(旧行为:照写)。
+          writeFileSync(lockFileOf(dir), `thief-token ${process.pid}\n`);
+          assertOwned();
+          writeProject(dir, emptyProject('project-seed-guard'));
+          return null;
+        });
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+
+    expect(code).toBe('PROJECT_BUSY');
+    expect(existsSync(projectFileOf(dir))).toBe(false);
+  }, 30_000);
+
+  it('旧锁一律不自动抢(崩溃的 / 活人卡住的 / 空锁 / 坏 pid 四种形态)→ PROJECT_BUSY,锁原样留着,报错说得出是谁的', () => {
+    // 回收一把「看着像废锁」的锁只能先看后删 —— 那两步之间锁可能换主,删下去删的就是别人的活锁。
+    // 所以这里四种形态一律动都不动:报错里说清楚是哪把、谁留的、躺了多久,让人确认后手删。
+    const stale = new Date(Date.now() - 120_000);
+    const shapes: Array<{ name: string; content: string }> = [
+      { name: 'project-dead-holder', content: `crashed-process-token ${deadPid()}\n` },
+      // 活人卡住:按年龄算很旧,但写它的那个 pid 还在跑。
+      { name: 'project-slow-holder', content: `slow-holder-token ${process.pid}\n` },
+      // 位占上了、里面什么都没有(别的工具写的,或崩在写入中间)。
+      { name: 'project-headless-lock', content: '' },
+      // 内容写了一半:令牌有、pid 读不出数。
+      { name: 'project-bad-pid-lock', content: 'half-written-token\n' },
+    ];
+
+    for (const shape of shapes) {
+      const projectDir = seedProject(shape.name);
+      const before = readProject(projectDir);
+      writeFileSync(lockFileOf(projectDir), shape.content);
+      utimesSync(lockFileOf(projectDir), stale, stale);
+
+      const message = ((): string => {
+        try {
+          updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+          return '写了(不该:旧锁不许被自动抢,更不许悄悄写) ';
+        } catch (error: unknown) {
+          return (error as Error).message;
+        }
+      })();
+
+      // 一点都没写,而且那把锁原样留着(没被删、也没被改)。
+      expect(readProject(projectDir).revision).toBe(before.revision);
+      expect(readFileSync(lockFileOf(projectDir), 'utf8')).toBe(shape.content);
+      // 报错要把「哪把锁、谁的、躺了多久」说出来,不然人只能去猜该删哪个文件。
+      expect(message).toContain(lockFileOf(projectDir));
+      expect(message).toContain('躺了约 2 分钟');
+      expect(message).toContain('确认没人在写就删掉它再来');
+    }
+  }, 60_000);
+
+  it('锁文件被人删掉或换成别人的 → 落盘前认出来:不写,也不动别人那把', () => {
+    for (const mode of ['deleted', 'replaced'] as const) {
+      const projectDir = seedProject(`project-lock-${mode}`);
+      const before = readProject(projectDir);
+
+      const code = ((): string | null => {
+        try {
+          updateProject(projectDir, (current) => {
+            // 别的东西在这当口把锁删了 / 换成了它的令牌(新写法里没有「按年龄清废锁」这条路了,
+            // 但人要手删、别的工具也可能来碰):这时按路径删它,就是替第三个写者开门。
+            if (mode === 'deleted') unlinkSync(lockFileOf(projectDir));
+            else writeFileSync(lockFileOf(projectDir), `thief-token ${process.pid}\n`);
+            return { ...current, revision: current.revision + 1 };
+          });
+          return null;
+        } catch (error: unknown) {
+          return errorCode(error);
+        }
+      })();
+
+      expect(code).toBe('PROJECT_BUSY');
+      expect(readProject(projectDir).revision).toBe(before.revision);
+      if (mode === 'replaced') {
+        // 收尾时不许把别人那把锁删掉。
+        expect(readFileSync(lockFileOf(projectDir), 'utf8').trim()).toBe(`thief-token ${process.pid}`);
+      } else {
+        // 已经被删了:我不该反过来把它建回去(建回去等于替人占位)。
+        expect(existsSync(lockFileOf(projectDir))).toBe(false);
+      }
+    }
+  }, 30_000);
+
+  it('真起第二个进程占锁 → PROJECT_BUSY(锁是跨进程的,不是内存里那把)', async () => {
+    const projectDir = seedProject('project-real-process');
+    const before = readProject(projectDir);
+    const lock = lockFileOf(projectDir);
+    const ready = `${lock}.ready`;
+    const release = `${lock}.release`;
+    // 子进程自己拿自己的 pid 写锁(锁文件里记的就是持有者),拿住直到父进程叫它放。
+    const child = [
+      "const fs=require('fs');const [lock,ready,release]=process.argv.slice(1);",
+      "fs.writeFileSync(lock,'subprocess-'+process.pid+' '+process.pid+'\\n');",
+      "fs.writeFileSync(ready,String(process.pid));",
+      'const t=setInterval(()=>{if(!fs.existsSync(release))return;clearInterval(t);',
+      'try{fs.unlinkSync(lock)}catch{};try{fs.unlinkSync(ready)}catch{};process.exit(0);},20);',
+    ].join('');
+    const holder = run('node', ['-e', child, lock, ready, release]);
+    try {
+      // 等它真占上锁(不是睡一个猜出来的毫秒数 —— 那样负载一高就随机红)。
+      for (let i = 0; i < 500 && !existsSync(ready); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(existsSync(ready)).toBe(true);
+      const childPid = readFileSync(ready, 'utf8').trim();
+      expect(childPid).toMatch(/^\d+$/);
+      // 锁里第二个字段得是那个子进程的 pid:这才是「活着的别的进程」,和上面那条
+      // 「活 pid 不许被抢」是同一件事的两面。
+      expect(readFileSync(lock, 'utf8').trim().split(/\s+/)[1]).toBe(childPid);
+
+      const code = ((): string | null => {
+        try {
+          updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+          return null;
+        } catch (error: unknown) {
+          return errorCode(error);
+        }
+      })();
+      expect(code).toBe('PROJECT_BUSY');
+      expect(readProject(projectDir).revision).toBe(before.revision);
+    } finally {
+      // 不管上面怎样都叫它放锁退出,不留孤儿进程。
+      writeFileSync(release, 'go\n');
+      await holder;
+    }
+    expect(existsSync(lock)).toBe(false);
+  }, 60_000);
+
+  it('一个进程拿着锁在写、另一个进程同时写 → 被锁挡下,工程只动了一次(真跨进程,不靠调度运气)', async () => {
+    const projectDir = seedProject('project-lock-race');
+    const before = readProject(projectDir);
+    const held = join(dir, 'race.held');
+    const holderOut = join(dir, 'race-holder.out');
+    const contenderOut = join(dir, 'race-contender.out');
+    // 子进程要 import 到 src/*.ts,所以第二个进程也走 vitest(它自己解析 TS)而不是裸 node。
+    const child = (env: Record<string, string>) =>
+      run('corepack', ['pnpm', 'exec', 'vitest', 'run', 'test/lock-race-child.test.ts'], {
+        cwd: process.cwd(),
+        env: { ...process.env, ...env },
+        maxBuffer: 8 * 1024 * 1024,
+      });
+
+    // 拿锁那个:拿住之后在临界区里等对方那一下(它的尝试结果落地了才放锁)。
+    const holder = child({
+      VR_LOCK_CHILD_MODE: 'hold',
+      VR_LOCK_CHILD_DIR: projectDir,
+      VR_LOCK_CHILD_OUT: holderOut,
+      VR_LOCK_CHILD_HELD: held,
+      VR_LOCK_CHILD_WAIT_OUT: contenderOut,
+    });
+    // 抢的那个:等 `.held` 出现(对方确实在临界区里)才动手 —— 自己不看时间,就不会被调度运气放过去。
+    const contender = child({
+      VR_LOCK_CHILD_MODE: 'contend',
+      VR_LOCK_CHILD_DIR: projectDir,
+      VR_LOCK_CHILD_OUT: contenderOut,
+      VR_LOCK_CHILD_HELD: held,
+    });
+    await Promise.all([holder, contender]);
+
+    // 没锁的实现里这边会写成功 —— 这条就对不上。
+    expect(readFileSync(contenderOut, 'utf8').trim()).toBe('PROJECT_BUSY');
+    expect(readFileSync(holderOut, 'utf8').trim()).toBe('wrote');
+    // 被挡下的那次一点没写:只动了拿锁那个的一次。
+    expect(readProject(projectDir).revision).toBe(before.revision + 1);
+    // 两个进程都收工之后锁没留下,下个人还能正常写。
+    expect(existsSync(lockFileOf(projectDir))).toBe(false);
+    const after = updateProject(projectDir, (current) => ({
+      ...current,
+      revision: current.revision + 1,
+      parentHash: projectHash(current),
+    }));
+    expect(after.revision).toBe(before.revision + 2);
+  }, 180_000);
 });

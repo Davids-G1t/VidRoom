@@ -17,6 +17,7 @@
   "files": [
     "lib",
     "workflows",
+    "references",
     "client",
     "cordis.patch.yml",
     "README.md"

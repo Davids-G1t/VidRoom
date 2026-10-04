@@ -4,6 +4,7 @@
  */
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import type { ApiPrompt } from '../../src/h3.js';
 
 export interface FakeComfy {
@@ -23,6 +24,8 @@ export interface FakeComfyOptions {
   /** 让任务在 ComfyUI 那边失败。 */
   fail?: boolean;
   filename?: string;
+  /** 取产物时真发这个文件的字节(给需要真探测的第 2 批链路用);不给就发占位字节。 */
+  viewFile?: string;
 }
 
 async function readBody(request: AsyncIterable<Buffer | string>): Promise<string> {
@@ -88,7 +91,7 @@ export async function startFakeComfy(options: FakeComfyOptions = {}): Promise<Fa
       }
       if (url.pathname === '/view') {
         response.writeHead(200, { 'content-type': 'video/mp4' });
-        response.end('fake-mp4-bytes');
+        response.end(options.viewFile === undefined ? 'fake-mp4-bytes' : readFileSync(options.viewFile));
         return;
       }
       send(404, { error: `假 ComfyUI 没有这个端点:${url.pathname}` });

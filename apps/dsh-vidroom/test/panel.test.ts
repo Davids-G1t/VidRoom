@@ -168,3 +168,140 @@ describe('工作流库面板', () => {
     expect(status.textContent).toContain('跑着呢(run-1)');
   });
 });
+
+/**
+ * 工程面板的写入口:这是「复刻一条爆款」在默认装法下的唯一通道。
+ *
+ * 工程面工具默认不注册(`config.chatTools`),所以面板只读 = 这条链在默认安装里走不通
+ * (第三轮审查的 high)。这里钉住:从造工程到渲染这几步在面板上点得出来,
+ * 而且请求打的是同一批本地路由。
+ */
+describe('工程面板(写入口)', () => {
+  const PROJECT_DIR = '/tmp/vr/p1';
+  const PLAN_HASH = '9'.repeat(64);
+  const calls: Call[] = [];
+
+  function projectFetch(input: string, init?: RequestInit): Promise<Response> {
+    const url = String(input);
+    const body: unknown = init?.body === undefined ? undefined : JSON.parse(String(init.body));
+    calls.push(body === undefined ? { url } : { url, body });
+    const view = {
+      projectPath: PROJECT_DIR,
+      projectFile: `${PROJECT_DIR}/project.vr.json`,
+      projectId: 'p1',
+      revision: 3,
+      projectHash: 'a1b2c3d4',
+      counts: { assets: 1, shots: 1, candidates: 1, selected: 0, alignments: 0, anchors: 0, captions: 0, effects: 0, variants: 0 },
+      issues: [],
+      alignmentIssues: [],
+    };
+    if (url.startsWith('/vidroom/workflows')) {
+      return Promise.resolve(jsonResponse({ ok: true, workflows: [WORKFLOW], env: {} }));
+    }
+    if (url.startsWith('/vidroom/projects')) {
+      return Promise.resolve(jsonResponse({ ok: true, root: '/tmp/vr', projects: [view] }));
+    }
+    if (url.startsWith('/vidroom/project?')) {
+      return Promise.resolve(
+        jsonResponse({ ok: true, project: view, candidates: [], missingAssets: [], runs: [], shots: [{ id: 'shot-1', order: 0, text: '第一段' }] }),
+      );
+    }
+    if (url.startsWith('/vidroom/assets?')) {
+      return Promise.resolve(
+        jsonResponse({ ok: true, total: 1, items: [{ id: 'asset-1', kind: 'video', path: 'assets/a.mp4', sha256: 'f'.repeat(64), missing: false }] }),
+      );
+    }
+    if (url.startsWith('/vidroom/plan?')) {
+      return Promise.resolve(
+        jsonResponse({
+          ok: true,
+          plan: {
+            target: 'candidates',
+            planHash: PLAN_HASH,
+            projectHash: 'a1b2c3d4',
+            ready: true,
+            blockers: [],
+            newRequests: 1,
+            reuseCandidateIds: [],
+            summary: '计划 999999999999(目标 candidates · 工程哈希 a1b2c3d4)',
+          },
+        }),
+      );
+    }
+    if (url === '/vidroom/render') {
+      return Promise.resolve(jsonResponse({ ok: true, runId: 'run-9', mode: 'generate-missing', job: {} }));
+    }
+    return Promise.reject(new Error(`测试没准备这个请求:${url}`));
+  }
+
+  it('造工程 → 算计划 → 按计划渲染,都能在面板上点出来,请求走同一条本地路由', async () => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(projectFetch));
+    // beforeEach 那份实例是用「工作流面板」的假宿主渲染的,先摘掉 —— 不然下面查到的是那一份。
+    act(() => {
+      root.unmount();
+    });
+    host.remove();
+    const ownHost = document.createElement('div');
+    document.body.appendChild(ownHost);
+    const ownRoot = createRoot(ownHost);
+    act(() => {
+      ownRoot.render(h(VidroomPanel));
+    });
+
+    try {
+      // 每次都重新查一遍:面板会重渲染,抓着旧节点等会把结果看漏。
+      const pickerOption = await waitFor(
+        () => document.querySelector<HTMLOptionElement>('.dvr-form select.dvr-input option[value="/tmp/vr/p1"]'),
+        '工程选项',
+      );
+      expect(pickerOption.textContent).toContain('p1');
+
+      await act(async () => {
+        const select = document.querySelector<HTMLSelectElement>('.dvr-form select.dvr-input');
+        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+        setter?.call(select, PROJECT_DIR);
+        select?.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      const labels = await waitFor(() => {
+        const texts = [...document.querySelectorAll<HTMLButtonElement>('.dvr-btn')].map((button) => button.textContent);
+        return texts.includes('按这份计划渲染') ? texts : null;
+      }, '写入口按钮');
+      // 造工程 / 改工程 / 导素材 / 登记候选 / 校词窗 —— 一个都不能少,否则面板只能看不能改。
+      for (const label of ['造工程', '应用改动', '导进来', '登记候选', '算候选计划', '按这份计划渲染', '校词窗']) {
+        expect(labels).toContain(label);
+      }
+
+      const click = async (label: string): Promise<void> => {
+        const button = [...document.querySelectorAll<HTMLButtonElement>('.dvr-btn')].find(
+          (item) => item.textContent === label,
+        );
+        expect(button, `找不到按钮 ${label}`).toBeDefined();
+        await act(async () => {
+          button?.click();
+        });
+      };
+
+      await click('算候选计划');
+      const planned = calls.find((call) => call.url.startsWith('/vidroom/plan?'));
+      expect(planned?.url).toContain(`path=${encodeURIComponent(PROJECT_DIR)}`);
+      expect(planned?.url).toContain('target=candidates');
+      await waitFor(() => document.querySelector('.dvr-status--ok'), '计划结论');
+
+      await click('按这份计划渲染');
+      const rendered = calls.find((call) => call.url === '/vidroom/render');
+      expect(rendered?.body).toMatchObject({
+        path: PROJECT_DIR,
+        mode: 'generate-missing',
+        planHash: PLAN_HASH,
+        expectedProjectHash: 'a1b2c3d4',
+      });
+    } finally {
+      act(() => {
+        ownRoot.unmount();
+      });
+      ownHost.remove();
+    }
+  });
+});

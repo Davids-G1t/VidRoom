@@ -51,6 +51,7 @@ export const CSS = `
   color: inherit; padding: 5px 12px; font-size: 13px; cursor: pointer;
 }
 .dvr-btn:disabled { opacity: 0.5; cursor: default; }
+.dvr-check { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .dvr-status { font-size: 12px; }
 .dvr-status--ok { color: var(--dsw-alias-state-success-primary); }
 .dvr-status--err { color: var(--dsw-alias-state-error-primary); }

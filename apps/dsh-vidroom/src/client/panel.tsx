@@ -1,11 +1,13 @@
 /**
- * VidRoom 面板(shell.overlay,id `vidroom.panel`):工作流库。
- * 左边是内置工作流,点一份就在下面看它的 SKILL.md 原文、填一句主题、点运行;
+ * VidRoom 面板(shell.overlay,id `vidroom.panel`):工作流库 + 第 2 批的工程面。
+ * 上半:内置工作流,点一份就在下面看它的 SKILL.md 原文、填一句主题、点运行;
  * 出片是分钟级,所以点完立刻拿到一条运行记录,后面每两秒轮一次进度。
+ * 下半:挑一个 `vr.project/1` 工程,看它的镜头/候选/run/资产并当场回放。
  */
 import { createElement as h, useCallback, useEffect, useState, type ReactNode } from 'react';
 import { getJson, postJson, unwrap } from './api.ts';
 import { panelStore, usePanelOpen } from './store.ts';
+import { ProjectPanel } from './project-panel.tsx';
 
 interface WorkflowSummary {
   slug: string;
@@ -272,5 +274,5 @@ export function VidroomPanel(): ReactNode {
     ),
   ];
 
-  return h('div', { className: 'dvr-panel' }, ...children);
+  return h('div', { className: 'dvr-panel' }, ...children, h(ProjectPanel, { key: 'project' }));
 }

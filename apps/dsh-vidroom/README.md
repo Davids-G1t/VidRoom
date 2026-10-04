@@ -33,6 +33,10 @@ dsh plugin --profile <profile> remove dsh-vidroom
 - 不想从目录装,也可以先 `corepack pnpm pack` 打出 `dsh-vidroom-<版本>.tgz`,再
   `dsh plugin --profile <profile> add <tgz 的路径>`(打包会自动先构建,`prepack` 脚本负责)。
 
+从零装一台 **Windows + NVIDIA** 机器(宿主、ComfyUI、H3 权重、ffmpeg、插件、接线)的完整步骤见
+[`docs/windows-install.md`](./docs/windows-install.md) —— 那份写成可以直接交给**那台机器上的 agent**
+照着做,带版本号、字节数与 sha256。
+
 ## Agent 拿到什么
 
 **工程面工具(`vidroom_reference` 及以下那张表里除前三行外的全部)默认不注册**:参考片、文案、音轨、

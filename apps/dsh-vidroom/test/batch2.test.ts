@@ -24,7 +24,7 @@ import { mountVidroomRoutes } from '../src/routes.js';
 import { DEFAULT_PATCH_EXAMPLE } from '../src/client/project-panel.tsx';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
-import { readProject, importAsset, lockFileOf, updateProject, writeProject } from '../src/project-io.js';
+import { readProject, importAsset, lockFileOf, projectFileOf, updateProject, withProjectLock, writeProject } from '../src/project-io.js';
 import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl, importProjectAsset } from '../src/project-ops.js';
 import { readConfig } from '../src/config.js';
 import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
@@ -1683,6 +1683,31 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(readProject(projectDir).revision).toBe(before.revision);
     // 别人的锁还在(没被顺手删掉)。
     expect(existsSync(lockFileOf(projectDir))).toBe(true);
+  }, 30_000);
+
+  it('新建工程那两条路也认手:锁在落盘前被替掉 → 不落盘(PROJECT_BUSY)', () => {
+    // 新建的空白工程与首次登记的参考片,是仅有的两条直接调 writeProject 的路:
+    // 它们写之前也得先认一次手,不然上面那条 assertOwned 就只管住了 updateProject 那一半。
+    const dir = join(mkdtempSync(join(tmpdir(), 'vr-')), 'project-seed-guard');
+    mkdirSync(dir, { recursive: true });
+
+    const code = ((): string | null => {
+      try {
+        withProjectLock(dir, (assertOwned) => {
+          // 冒充另一个进程:落盘前把锁换成它的令牌(旧行为:照写)。
+          writeFileSync(lockFileOf(dir), `thief-token ${process.pid}\n`);
+          assertOwned();
+          writeProject(dir, emptyProject('project-seed-guard'));
+          return null;
+        });
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+
+    expect(code).toBe('PROJECT_BUSY');
+    expect(existsSync(projectFileOf(dir))).toBe(false);
   }, 30_000);
 
   it('旧锁一律不自动抢(崩了的 / 卡住的 / 没内容三种形态)→ PROJECT_BUSY,锁原样留着,报错说得出是谁的', () => {

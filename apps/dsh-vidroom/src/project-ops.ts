@@ -169,11 +169,13 @@ export function createProject(config: Config, projectId?: string): { dir: string
     throw new VidroomError('PROJECT_INVALID', `工程 id 越出 projectsRoot:${projectId}`);
   }
   // 「目录里已有工程」的检查与落盘都在锁里:两个进程同时新建同名工程时,只有一个能立上桩。
-  return withProjectLock(dir, () => {
+  return withProjectLock(dir, (assertOwned) => {
     if (existsSync(projectFileOf(dir))) {
       throw new VidroomError('PROJECT_INVALID', `${dir} 已经有工程了`);
     }
     ensureDir(dir);
+    // 跟 updateProject 一样,写之前认一次手:锁被删掉/替掉就不落盘(这里也是唯一的裸写路径)。
+    assertOwned();
     writeProject(dir, emptyProject(id));
     return { dir, project: readProject(dir) };
   });
@@ -421,8 +423,10 @@ export async function registerReference(
     project = emptyProject(projectId);
     // 新工程先把空壳落盘(在锁里查、在锁里写):两个进程同时登记同一条新工程时,
     // 只有先拿到锁的那个落空壳,后来者读到的是已经存在的工程,不会把别人的东西盖回去。
-    withProjectLock(dir, () => {
-      if (!existsSync(projectFileOf(dir))) writeProject(dir, project);
+    withProjectLock(dir, (assertOwned) => {
+      if (existsSync(projectFileOf(dir))) return;
+      assertOwned();
+      writeProject(dir, project);
     });
   }
 

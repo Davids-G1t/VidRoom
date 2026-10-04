@@ -13,7 +13,7 @@
  * —— 它是唯一带跨进程互斥与乐观复核的写路径。
  */
 
-import { closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 import { VidroomError } from './errors.js';
 import { probeMedia, sha256File, type MediaTools, type Probe } from './media.js';
@@ -116,16 +116,21 @@ export function lockFileOf(dir: string): string {
  * CLI、被面板拉起的渲染回写,是三个不同的进程,内存锁只挡得住其中一个。`open(…, O_EXCL)` 是
  * 文件系统给的原子占位,同一个锁名只有一个写者建得成,失败方等一小会儿。
  *
- * **不自动回收旧锁**(这是取舍,不是省事):内核没给这把锁一个「主人还活着吗」的可靠问法 ——
- * Node 核心没暴露 `flock`,能拿到的只有 pid 与文件年龄,而回收一个「看着像废锁」的锁必须先看后删,
- * 两步之间锁可能已经换了主(持有者放掉、别人占上),删下去删的就是别人的活锁 —— 那正好就是
- * 两个写者同时落盘。git 对自己的 `index.lock` 也是这个取舍:留着、报错、让人确认后手删。
- * 代价:**持有者崩溃会留下锁,这条工程在有人手删之前写不进去**。报错里给锁路径、写它的进程与躺了多久,
- * 确认没人在写就删掉它再来 —— 替人省下「去猜该不该删」的那一步。
+ * **不自动回收旧锁**(这是取舍,不是省事):回收一个「看着像废锁」的锁必须先看后删(先读它的内容与年龄,
+ * 再决定删不删),那两步之间锁可能已经换了主 —— 持有者自己放掉、别人刚占上,删下去删的就是别人的活锁,
+ * 那正好就是两个写者同时落盘。要真判「主人还活着吗」得靠内核给的锁(`flock` 一类),
+ * Node 核心的 `fs` 没有这个接口(凭记忆,未核官方文档)。git 对自己的 `index.lock` 同样是
+ * 「不回收、报错让人确认后手删」的做法(凭记忆,未核官方文档)。
+ * 代价:**持有者崩溃会留下锁,这条工程在有人手删之前写不进去**;报错里给锁路径、写它的进程与躺了多久,
+ * 替人省下「去猜该不该删」的那一步。
  *
  * 锁文件里写的是 `<令牌> <pid>`:令牌用来认自己(释放只删自己那把);pid 只给报错时看。
  * `run` 拿到一个 `assertOwned`(写进盘之前调一次):锁文件被人手工删掉/替掉时,宁可回 `PROJECT_BUSY`
- * 也不往下写 —— 这一步是保底:哪怕锁没了,也不会有两个写者同时落盘。
+ * 也不往下写。
+ *
+ * **这一步是尽量,不是安全边界**:它自己也是「先看后写」,看与写之间锁还能被换掉。它挡的是
+ * 「误删了锁文件、本进程接着按旧快照写」这种自伤;挡不住一个专门在外面删/替锁的进程 ——
+ * 那种对手要的是内核级的互斥(`flock`),本批不做,现状是「不守规矩的写者,结果由它自己负责」。
  */
 export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) => T): T {
   const lock = lockFileOf(dir);
@@ -211,32 +216,27 @@ function holderHint(lock: string): string {
 }
 
 /**
- * 占位:`O_CREAT | O_EXCL` 是文件系统给的原子检查,同一个锁名只有一个写者建得成。
+ * 占位:`wx` 就是 `O_CREAT | O_EXCL` —— 同一个锁名只有一个写者建得成,这是文件系统给的原子检查。
  *
- * 建成之后立刻写内容(令牌 + pid):写失败就把自己刚建的位收掉 —— 留个没内容的锁在这儿,
- * 后面谁都得手动删。
+ * 整份内容(`<令牌> <pid>`)一次写进去、写完自己关:不去手动拿 fd 逐个收尾 ——
+ * 短写由 Node 内部补完,也不用担心「关 fd 抛错把清理那一步跳过」留下内容不全的锁。
+ * 真没写成(盘满、权限变),把自己刚建的那个残件收掉再报错。
  */
 function createLockFile(lock: string, token: string): boolean {
-  let fd: number;
   try {
-    fd = openSync(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+    writeFileSync(lock, `${token} ${process.pid}\n`, { flag: 'wx', encoding: 'utf8' });
+    return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw new VidroomError('IO_ERROR', `工程写锁没占上(${(error as Error).message}),这次不写:${lock}`);
-  }
-  try {
-    writeSync(fd, `${token} ${process.pid}\n`);
-  } catch (error) {
-    closeSync(fd);
+    // 只有「占位成功了、内容没写成」才会留下残件,而这个残件一定是我刚建的(建的那一步是原子的):
+    // 收掉它。没建成的话这一下就是 ENOENT,没什么可收。
     try {
       unlinkSync(lock);
     } catch {
-      // 已经没了。
+      // 没留下东西,或清理也失败了:报错更重要,不在这儿纠缠。
     }
     throw new VidroomError('IO_ERROR', `工程写锁没写成(${(error as Error).message}),这次不写:${lock}`);
   }
-  closeSync(fd);
-  return true;
 }
 
 /**

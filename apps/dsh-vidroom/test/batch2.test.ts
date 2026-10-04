@@ -21,10 +21,12 @@ import { createVidroomRuntime } from '../src/runtime.js';
 import { apply } from '../src/index.js';
 import { framesForSeconds } from '../src/frames.js';
 import { mountVidroomRoutes } from '../src/routes.js';
+import { DEFAULT_PATCH_EXAMPLE } from '../src/client/project-panel.tsx';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
 import { readProject, importAsset } from '../src/project-io.js';
-import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl } from '../src/project-ops.js';
+import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl, importProjectAsset } from '../src/project-ops.js';
+import { readConfig } from '../src/config.js';
 import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
 import { assertSupported, h3Capabilities } from '../src/adapter.js';
 import { startFakeComfy } from './support/fake-comfy.js';
@@ -1289,7 +1291,27 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
       });
       // 旧行为:startRender 阻塞到跑完,这里已经是 succeeded(异步轮询的承诺是假的)。
       expect(['queued', 'running']).toContain(jobView(projectDir, started.runId).receipt?.state);
+      // 验收 3 的「单卡并发峰值 = 1」:同一条工程还在跑时再点一次,当场拒。
+      const again = await startRender(runtime, {
+        dir: projectDir,
+        mode: 'generate-missing',
+        planHash: plan.planHash,
+      }).catch((error: unknown) => error);
+      expect(errorCode(again)).toBe('ALREADY_RUNNING');
       expect(await waitForRun(projectDir, started.runId)).not.toBe('running');
+      // 跑完了锁要放掉,不然这条工程以后再也开不了(终态写盘与 finally 放锁差一拍,这里轮询等)。
+      const deadline = Date.now() + 2_000;
+      let released = false;
+      while (!released && Date.now() < deadline) {
+        const retry = await startRender(runtime, {
+          dir: projectDir,
+          mode: 'generate-missing',
+          planHash: plan.planHash,
+        }).catch((error: unknown) => error);
+        released = errorCode(retry) !== 'ALREADY_RUNNING';
+        if (!released) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(released).toBe(true);
     } finally {
       await comfy.close();
     }
@@ -1469,4 +1491,44 @@ describe('第四轮审查的回归(旧行为必须失败)', () => {
     expect(codeOf(() => assertRecordedUrl('data:text/plain,hi'))).toBe('PROJECT_INVALID');
     expect(codeOf(() => assertRecordedUrl('随便写的'))).toBe('PROJECT_INVALID');
   });
+});
+
+describe('第五轮(合后自查)的回归', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-fix5-'));
+
+  maybe('导入素材期间别人改了工程:那条改动不被导入的旧快照盖掉', async () => {
+    const projectDir = join(dir, 'project-import-race');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    const incoming = join(dir, 'clip-import-race.mp4');
+    await makeClip(incoming, { frames: 12, color: 'orange' });
+
+    const config = readConfig({ ffmpegPath: TOOLS.ffmpegPath, ffprobePath: TOOLS.ffprobePath });
+    // 导入里会 await(算 sha256 + 跑探针):不等它,趁这段时间改一次工程。
+    // 旧行为:importProjectAsset 拿开工时那份整份回写,这句提示词连人带改动一起被盖回去。
+    const importing = importProjectAsset(config, projectDir, { sourcePath: incoming, kind: 'video' });
+    const mid = readProject(projectDir);
+    patchProject(projectDir, mid, {
+      baseHash: projectHash(mid),
+      patch: [{ op: 'replace', path: 'shots[0].generation.prompt', value: '导入期间改过的提示词' }],
+    });
+    const { asset } = await importing;
+
+    const after = readProject(projectDir);
+    expect(after.assets.some((item) => item.id === asset.id)).toBe(true);
+    expect(after.shots[0]!.generation.prompt).toBe('导入期间改过的提示词');
+  }, 60_000);
+
+  maybe('面板「改工程」的默认示例当场能应用(旧行为:示例写 /shots/0/text,点了必吃 PATCH_REJECTED)', async () => {
+    const projectDir = join(dir, 'project-default-patch');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    const example = JSON.parse(DEFAULT_PATCH_EXAMPLE) as PatchOp[];
+    const patched = patchProject(projectDir, readProject(projectDir), {
+      baseHash: projectHash(readProject(projectDir)),
+      patch: example,
+    });
+    expect(patched.project.shots[0]!.generation.prompt).toBe('改成你要的画面描述');
+  }, 60_000);
 });

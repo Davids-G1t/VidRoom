@@ -8,6 +8,15 @@
 import { createElement as h, useCallback, useEffect, useState, type ReactNode } from 'react';
 import { getJson, postJson, unwrap } from './api.ts';
 
+/**
+ * 面板「改工程」的默认示例。
+ *
+ * 必须是一条真能被接受的 patch:用户点「应用改动」第一个跑的就是它。
+ * 写成 `/shots/0/text` 那种(带 JSON Pointer 前缀、字段又不存在)必然吃 `PATCH_REJECTED`(被审到过一次)。
+ */
+export const DEFAULT_PATCH_EXAMPLE =
+  '[{ "op": "replace", "path": "shots[0].generation.prompt", "value": "改成你要的画面描述" }]';
+
 interface ProjectView {
   projectPath: string;
   projectId: string;
@@ -154,7 +163,7 @@ function ProjectActions(props: {
   const [newProjectId, setNewProjectId] = useState('');
   const [referencePath, setReferencePath] = useState('');
   const [referenceUrl, setReferenceUrl] = useState('');
-  const [patchText, setPatchText] = useState('[{ "op": "replace", "path": "shots[0].generation.prompt", "value": "改成你要的画面描述" }]');
+  const [patchText, setPatchText] = useState(DEFAULT_PATCH_EXAMPLE);
   const [importPath, setImportPath] = useState('');
   const [importKind, setImportKind] = useState('video');
   const [shotId, setShotId] = useState('');

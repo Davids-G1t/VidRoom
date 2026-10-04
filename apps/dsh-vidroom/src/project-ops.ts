@@ -12,7 +12,19 @@ import { mediaTools } from './config.js';
 import { VidroomError } from './errors.js';
 import type { MediaTools, Probe } from './media.js';
 import { buildPlan, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, ensureDir, importAsset, nextId, projectFileOf, readProject, resolveInside, updateProject, writeProject } from './project-io.js';
+import {
+  applyPatch,
+  ensureDir,
+  importAsset,
+  nextId,
+  projectFileOf,
+  readProject,
+  resolveInside,
+  updateProject,
+  withProjectLock,
+  writeProject,
+  type PatchResult,
+} from './project-io.js';
 import {
   PROJECT_FILE,
   emptyProject,
@@ -105,30 +117,35 @@ export function inspectProject(dir: string, project: Project): ProjectView {
 
 export function patchProject(
   dir: string,
-  project: Project,
   options: { baseHash?: string | undefined; patch: PatchOp[] },
 ): {
   project: Project;
+  previousHash: string;
   changedPaths: string[];
   invalidatedShotIds: string[];
   selectionClearedShotIds: string[];
   alignmentRequired: boolean;
   projectHash: string;
 } {
-  const current = projectHash(project);
-  if (options.baseHash !== undefined && options.baseHash !== current) {
-    throw new VidroomError(
-      'PROJECT_HASH_MISMATCH',
-      `工程已经变了(现在 ${current.slice(0, 12)},收到 ${options.baseHash.slice(0, 12)});重新读一次再改`,
-    );
-  }
-  const patched = applyPatch(project, options.patch);
-  patched.project.revision = project.revision + 1;
-  patched.project.parentHash = current;
-  const next = validateProject(patched.project);
-  writeProject(dir, next);
+  // patch 施于锁内重读的那份(不是调用方手里那份):否则「读到算新工程」这中间的别人的改动
+  // 会被整份写回盖掉。要给并发把关的调用方传 baseHash,变了就 PROJECT_HASH_MISMATCH,不默默改。
+  let patched!: PatchResult;
+  let before = '';
+  const next = updateProject(
+    dir,
+    (current) => {
+      before = projectHash(current);
+      const result = applyPatch(current, options.patch);
+      result.project.revision = current.revision + 1;
+      result.project.parentHash = before;
+      patched = result;
+      return validateProject(result.project);
+    },
+    { baseHash: options.baseHash },
+  );
   return {
     project: next,
+    previousHash: before,
     changedPaths: patched.changedPaths,
     invalidatedShotIds: patched.invalidatedShotIds,
     selectionClearedShotIds: patched.selectionClearedShotIds,
@@ -151,12 +168,15 @@ export function createProject(config: Config, projectId?: string): { dir: string
   if (!resolve(dir).startsWith(`${root}${sep}`)) {
     throw new VidroomError('PROJECT_INVALID', `工程 id 越出 projectsRoot:${projectId}`);
   }
-  if (existsSync(projectFileOf(dir))) {
-    throw new VidroomError('PROJECT_INVALID', `${dir} 已经有工程了`);
-  }
-  ensureDir(dir);
-  writeProject(dir, emptyProject(id));
-  return { dir, project: readProject(dir) };
+  // 「目录里已有工程」的检查与落盘都在锁里:两个进程同时新建同名工程时,只有一个能立上桩。
+  return withProjectLock(dir, () => {
+    if (existsSync(projectFileOf(dir))) {
+      throw new VidroomError('PROJECT_INVALID', `${dir} 已经有工程了`);
+    }
+    ensureDir(dir);
+    writeProject(dir, emptyProject(id));
+    return { dir, project: readProject(dir) };
+  });
 }
 
 /** 列出 projectsRoot 下的工程(面板左侧列表)。 */
@@ -387,10 +407,10 @@ export async function registerReference(
   const tools = mediaTools(config);
 
   let dir: string;
+  // 这份快照只用来给 importAsset 避开已有的资产 id;真正落盘的那份一律在锁里重读(见下面的 updateProject)。
   let project: Project;
-  let opened: { dir: string; project: Project } | undefined;
   if (input.projectPath !== undefined && existsSync(projectFileOf(projectDirOf(input.projectPath)))) {
-    opened = openProject(input.projectPath);
+    const opened = openProject(input.projectPath);
     dir = opened.dir;
     project = opened.project;
   } else {
@@ -399,6 +419,8 @@ export async function registerReference(
     dir = input.projectPath === undefined ? join(config.projectsRoot, projectId) : projectDirOf(input.projectPath);
     ensureDir(dir);
     project = emptyProject(projectId);
+    // 新工程先把空壳落盘:下面的登记统一走 updateProject(锁内重读),文件不在就没得读。
+    if (!existsSync(projectFileOf(dir))) writeProject(dir, project);
   }
 
   const asset = await importAsset(dir, {
@@ -411,43 +433,47 @@ export async function registerReference(
   if (asset.probe === undefined) {
     throw new VidroomError('MEDIA_TOOL_MISSING', `读不出 ${localPath} 的视频参数(检查 ffprobe),做不了参考分析`);
   }
+  // 抽出来一个已缩窄的 const:下面写进工程的那份在闭包里,拿不到 `asset.probe !== undefined` 这个收窄。
+  const probe = asset.probe;
   const detection = await detectCutFrames(resolve(dir, asset.path), tools, asset.probe);
   const shots = analysisShots(asset.probe, detection.frames);
 
-  // 上面两步是秒级的:这段时间里别人(面板、另一条会话)可能改过这份工程。
-  // 重建重读一次 —— 重新登记参考会整份换掉 reference 与 analysis,但不能连带把别人的资产/patch 盖回去。
-  if (opened !== undefined) project = readProject(dir);
-
-  project.assets.push(asset);
-  project.reference = {
-    assetId: asset.id,
-    ...(input.referenceUrl === undefined ? {} : { referenceUrl: input.referenceUrl }),
-    probe: asset.probe,
-    analysisStatus: 'draft',
-  };
-  project.analysis = {
-    shots,
-    rhythm: [],
-    structure: [],
-    captionStyle: input.annotations?.captionStyle ?? DEFAULT_CAPTION_STYLE,
-    voice: input.annotations?.voice ?? { description: '待人工校订', observedShotIds: [], status: 'draft' },
-    evidence: [
-      { field: 'reference.probe', method: 'probe' },
-      ...shots.map((shot) => ({
-        field: 'analysis.shots',
-        shotId: shot.id,
-        frame: shot.startFrame,
-        method: 'probe' as const,
-      })),
-    ],
-  };
-  project.revision += 1;
-  writeProject(dir, validateProject(project));
+  // 上面两步是秒级的:收尾整份换 reference 与 analysis,但不连带把别人的资产/patch 盖回去 ——
+  // 锁内重读重并(updateProject),不在这个窗口里整份写回。
+  const merged = updateProject(dir, (current) => {
+    const next = structuredClone(current) as Project;
+    next.assets.push(asset);
+    next.reference = {
+      assetId: asset.id,
+      ...(input.referenceUrl === undefined ? {} : { referenceUrl: input.referenceUrl }),
+      probe,
+      analysisStatus: 'draft',
+    };
+    next.analysis = {
+      shots,
+      rhythm: [],
+      structure: [],
+      captionStyle: input.annotations?.captionStyle ?? DEFAULT_CAPTION_STYLE,
+      voice: input.annotations?.voice ?? { description: '待人工校订', observedShotIds: [], status: 'draft' },
+      evidence: [
+        { field: 'reference.probe', method: 'probe' },
+        ...shots.map((shot) => ({
+          field: 'analysis.shots',
+          shotId: shot.id,
+          frame: shot.startFrame,
+          method: 'probe' as const,
+        })),
+      ],
+    };
+    next.revision = current.revision + 1;
+    next.parentHash = projectHash(current);
+    return validateProject(next);
+  });
 
   return {
     projectPath: dir,
     projectFile: projectFileOf(dir),
-    projectHash: projectHash(project),
+    projectHash: projectHash(merged),
     assetId: asset.id,
     probe: asset.probe,
     method: detection.method,
@@ -506,7 +532,6 @@ export interface AlignView {
 
 export function alignSegment(
   dir: string,
-  project: Project,
   input: {
     segmentId: string;
     assetId: string;
@@ -515,22 +540,28 @@ export function alignSegment(
     wordWindows: Array<{ tokenId: string; startFrame: number; endFrame: number }>;
   },
 ): AlignView {
-  const alignment = buildAlignment(project, input);
-  const kept = project.alignments.filter((item) => item.segmentId !== alignment.segmentId);
-  const next: Project = { ...project, alignments: [...kept, alignment] };
-  const audio = next.audio ?? { mode: 'local' as const, assetIds: [], alignmentStatus: 'pending' as const };
-  // 静音工程一旦绑上录音就是要用它:模式跟着改成 local。
-  // (不改的话合成会当静音,资产白登记 —— 这条在返回值 summary 里明说,不默默改。)
-  const switched = audio.mode === 'silent';
-  next.audio = {
-    ...audio,
-    mode: switched ? ('local' as const) : audio.mode,
-    assetIds: audio.assetIds.includes(alignment.assetId) ? audio.assetIds : [...audio.assetIds, alignment.assetId],
-    alignmentStatus: 'confirmed',
-  };
-  next.revision = project.revision + 1;
-  next.parentHash = projectHash(project);
-  writeProject(dir, validateProject(next));
+  // 对齐同样走锁内读-改-写:调度器/面板报上来的锚点要贴到锁内重读的那份上,
+  // 不然这中间的别人的改动(另一段对齐、新建的候选)会被整份写回盖掉。
+  let alignment!: ReturnType<typeof buildAlignment>;
+  let switched = false;
+  const next = updateProject(dir, (current) => {
+    alignment = buildAlignment(current, input);
+    const kept = current.alignments.filter((item) => item.segmentId !== alignment.segmentId);
+    const draft: Project = { ...current, alignments: [...kept, alignment] };
+    const audio = draft.audio ?? { mode: 'local' as const, assetIds: [], alignmentStatus: 'pending' as const };
+    // 静音工程一旦绑上录音就是要用它:模式跟着改成 local。
+    // (不改的话合成会当静音,资产白登记 —— 这条在返回值 summary 里明说,不默默改。)
+    switched = audio.mode === 'silent';
+    draft.audio = {
+      ...audio,
+      mode: switched ? ('local' as const) : audio.mode,
+      assetIds: audio.assetIds.includes(alignment.assetId) ? audio.assetIds : [...audio.assetIds, alignment.assetId],
+      alignmentStatus: 'confirmed',
+    };
+    draft.revision = current.revision + 1;
+    draft.parentHash = projectHash(current);
+    return validateProject(draft);
+  });
   const compiled = compileTimelineEvents(next);
   const unresolved = alignmentIssues(next);
   return {
@@ -697,36 +728,39 @@ export function registerCandidate(
   dir: string,
   input: { shotId: string; assetId: string; seed?: number | undefined; select?: boolean | undefined },
 ): { candidate: Candidate; projectHashAfter: string } {
-  const current = readProject(dir);
-  const shot = current.shots.find((item) => item.id === input.shotId);
-  if (shot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${input.shotId}`);
-  const asset = current.assets.find((item) => item.id === input.assetId);
-  if (asset === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有资产 ${input.assetId}`);
-  const probe = asset.probe;
-  const candidate: Candidate = {
-    id: candidateId(current.candidates.map((item) => item.id)),
-    shotId: input.shotId,
-    assetId: input.assetId,
-    recipeHash: asset.sha256.slice(0, 16),
-    ...(input.seed === undefined ? {} : { seed: input.seed }),
-    actual: {
-      width: probe?.width ?? 0,
-      height: probe?.height ?? 0,
-      fps: probe?.fps ?? { num: 24, den: 1 },
-      frames: probe?.frames ?? 0,
-      audio: probe?.audio ?? false,
-    },
-    status: 'available',
-  };
-  // 候选 id 列表不在白名单 patch 能碰的范围里,这里直接改并写出(仍走 validateProject)。
-  const next = structuredClone(current) as Project;
-  const targetShot = next.shots.find((item) => item.id === input.shotId);
-  if (targetShot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${input.shotId}`);
-  targetShot.candidateIds.push(candidate.id);
-  next.candidates.push(candidate);
-  if (input.select === true) targetShot.selectedCandidateId = candidate.id;
-  next.revision = current.revision + 1;
-  next.parentHash = projectHash(current);
-  writeProject(dir, validateProject(next));
+  // 手工登记候选同样走锁内读-改-写(候选 id 与 shot.candidateIds 都不在白名单 patch 能碰的范围里,
+  // 得直接改工程;但不能把别人在这中间的改动盖回去)。
+  let candidate!: Candidate;
+  const next = updateProject(dir, (current) => {
+    const shot = current.shots.find((item) => item.id === input.shotId);
+    if (shot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${input.shotId}`);
+    const asset = current.assets.find((item) => item.id === input.assetId);
+    if (asset === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有资产 ${input.assetId}`);
+    const probe = asset.probe;
+    candidate = {
+      id: candidateId(current.candidates.map((item) => item.id)),
+      shotId: input.shotId,
+      assetId: input.assetId,
+      recipeHash: asset.sha256.slice(0, 16),
+      ...(input.seed === undefined ? {} : { seed: input.seed }),
+      actual: {
+        width: probe?.width ?? 0,
+        height: probe?.height ?? 0,
+        fps: probe?.fps ?? { num: 24, den: 1 },
+        frames: probe?.frames ?? 0,
+        audio: probe?.audio ?? false,
+      },
+      status: 'available',
+    };
+    const draft = structuredClone(current) as Project;
+    const targetShot = draft.shots.find((item) => item.id === input.shotId);
+    if (targetShot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${input.shotId}`);
+    targetShot.candidateIds.push(candidate.id);
+    draft.candidates.push(candidate);
+    if (input.select === true) targetShot.selectedCandidateId = candidate.id;
+    draft.revision = current.revision + 1;
+    draft.parentHash = projectHash(current);
+    return validateProject(draft);
+  });
   return { candidate, projectHashAfter: projectHash(next) };
 }

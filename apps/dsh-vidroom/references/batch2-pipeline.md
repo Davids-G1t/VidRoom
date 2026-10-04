@@ -71,6 +71,10 @@
 写别的路径会回 `PATCH_REJECTED`,不会静默忽略。改了词/音轨/裁切/语速会让已有词锚作废 —— 这时工程会要求
 重新对齐(回 `ALIGNMENT_REQUIRED`),旧秒数不会被拿来顶。
 
+写者不止一个(面板、机器人进程里的 CLI、渲染回写):每次写都在工程文件旁的锁文件里互斥,并在锁内**重读**
+要改的那份再并进去 —— 所以别处刚改的字段不会被整份写回盖掉。想卡“我改的就是我看的那份”的,给
+`baseHash`;对不上回 `PROJECT_HASH_MISMATCH`(不默默换成新的写)。锁不巧被占着回 `PROJECT_BUSY`。
+
 ## 出错时看 code
 
 | code | 什么时候 | 怎么办 |
@@ -78,6 +82,7 @@
 | `REFERENCE_LOCAL_REQUIRED` | 登记参考时只给了链接 | 先把参考片落到本机再登记 |
 | `PROJECT_NOT_FOUND` / `PROJECT_INVALID` | 目录或 `project.vr.json` 不在、schema 不合法 | 先 `vidroom_project action=inspect` 看缺什么 |
 | `PROJECT_HASH_MISMATCH` / `PLAN_HASH_MISMATCH` | 工程或计划在算完以后变了 | 重新 `vidroom_plan` 再 render |
+| `PROJECT_BUSY` | 另一个写者正在写这条工程(面板、另一条会话、正在跑的渲染回写),或上回崩掉留下的锁还没过期 | 等一两秒重试;要是“立刻重试还是它”,先停手看一眼是不是真有另一个进程在写 |
 | `WORKFLOW_MISMATCH` | 盘上工作流与工程锁记的对不上 | 换回原工作流,或在工程里重新记锁 |
 | `MODEL_MISMATCH` | 盘上权重与 `locks.models` 记的对不上(文件不在/哈希不同) | 换回原权重;真换了权重就重新 lock |
 | `PATCH_REJECTED` | 改了白名单外的字段 | 只动文案/提示词/种子/选定/样式这类创作字段 |

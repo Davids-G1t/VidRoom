@@ -12,7 +12,7 @@
  * 就 queue,上面那两组「提交数 = 0」的断言就会红。
  */
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -24,7 +24,7 @@ import { mountVidroomRoutes } from '../src/routes.js';
 import { DEFAULT_PATCH_EXAMPLE } from '../src/client/project-panel.tsx';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
-import { readProject, importAsset, updateProject, writeProject } from '../src/project-io.js';
+import { readProject, importAsset, lockFileOf, updateProject, writeProject } from '../src/project-io.js';
 import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl, importProjectAsset } from '../src/project-ops.js';
 import { readConfig } from '../src/config.js';
 import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
@@ -139,7 +139,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
 
       // ② 参考片只给分析草稿,不给时间轴:通过工具的 patch 入口把镜头与合成时钟写进工程。
       // 这里故意不直接写文件 —— 直接写就证明不了「工具面能建工程」(那是本轮审查抓的 P1)。
-      const added = patchProject(projectDir, stored, {
+      const added = patchProject(projectDir, {
         baseHash: projectHash(stored),
         patch: [
           {
@@ -612,7 +612,9 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       },
       alignments: [],
     };
-    const aligned = alignSegment(projectDir, voiced, {
+    // 工程得先在盘上(alignSegment 在锁里重读那份):把这份夹具落盘再对齐。
+    writeProject(projectDir, voiced);
+    const aligned = alignSegment(projectDir, {
       segmentId: 'seg-1',
       assetId: audioAsset.id,
       audioHash: audioAsset.sha256,
@@ -637,7 +639,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
     // 删掉被锚定的词 → 当场 ALIGNMENT_REQUIRED(不静默拆锚、也不拿旧时间窗顶;验收 2)。
     const removalCode = ((): string | null => {
       try {
-        patchProject(projectDir, again, { patch: [{ op: 'remove', path: 'script.tokens[tk-2]' }] });
+        patchProject(projectDir, { patch: [{ op: 'remove', path: 'script.tokens[tk-2]' }] });
         return null;
       } catch (error: unknown) {
         return errorCode(error);
@@ -823,7 +825,9 @@ describe('本地音轨(audio.mode)', () => {
       alignments: [],
       shots: project.shots.map((shot) => ({ ...shot, segmentId: 'seg-1' })),
     };
-    alignSegment(projectDir, voiced, {
+    // 工程得先在盘上(alignSegment 在锁里重读那份):把这份夹具落盘再对齐。
+    writeProject(projectDir, voiced);
+    alignSegment(projectDir, {
       segmentId: 'seg-1',
       assetId: audioAsset.id,
       audioHash: audioAsset.sha256,
@@ -1074,7 +1078,9 @@ describe('第二轮审查边界(旧行为会失败的那些)', () => {
       alignments: [],
       shots: project.shots.map((shot) => ({ ...shot, segmentId: 'seg-1' })),
     };
-    alignSegment(projectDir, voiced, {
+    // 工程得先在盘上(alignSegment 在锁里重读那份):把这份夹具落盘再对齐。
+    writeProject(projectDir, voiced);
+    alignSegment(projectDir, {
       segmentId: 'seg-1',
       assetId: audioAsset.id,
       audioHash: audioAsset.sha256,
@@ -1159,7 +1165,7 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
     try {
       // 先把配方改掉(夹具候选是旧配方):计划里这才真有一条新请求,否则 plan 直接复用,根本没得回写。
       const seeded = readProject(projectDir);
-      patchProject(projectDir, seeded, {
+      patchProject(projectDir, {
         baseHash: projectHash(seeded),
         patch: [{ op: 'replace', path: 'shots[0].generation.seed', value: 2024 }],
       });
@@ -1172,7 +1178,7 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
       });
       // 生成还在跑:这会儿改工程。旧实现拿开工时那份整份回写,这一改就被抹掉了。
       const mid = readProject(projectDir);
-      patchProject(projectDir, mid, {
+      patchProject(projectDir, {
         baseHash: projectHash(mid),
         patch: [{ op: 'replace', path: 'shots[0].generation.prompt', value: '生成期间改过的提示词' }],
       });
@@ -1200,7 +1206,7 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
     const seeded = readProject(projectDir);
     const shot1 = seeded.shots[0]!;
     const newGeneration = { ...shot1.generation, prompt: '同配方新提示词', seed: 4242 };
-    patchProject(projectDir, seeded, {
+    patchProject(projectDir, {
       baseHash: projectHash(seeded),
       patch: [
         { op: 'replace', path: 'shots[0].generation.prompt', value: '同配方新提示词' },
@@ -1396,7 +1402,7 @@ describe('第四轮审查的回归(旧行为必须失败)', () => {
     try {
       // 先把配方改掉(夹具候选是旧配方),不然 plan 直接复用、根本没有回写这一步。
       const seeded = readProject(projectDir);
-      patchProject(projectDir, seeded, {
+      patchProject(projectDir, {
         baseHash: projectHash(seeded),
         patch: [{ op: 'replace', path: 'shots[0].generation.seed', value: 777 }],
       });
@@ -1511,7 +1517,7 @@ describe('第五轮(合后自查)的回归', () => {
     // f5ec4d9 已改成收尾重读;本 PR 再把收尾换成 `updateProject`(带乐观哈希复核)。这条用例把它钉住。
     const importing = importProjectAsset(config, projectDir, { sourcePath: incoming, kind: 'video' });
     const mid = readProject(projectDir);
-    patchProject(projectDir, mid, {
+    patchProject(projectDir, {
       baseHash: projectHash(mid),
       patch: [{ op: 'replace', path: 'shots[0].generation.prompt', value: '导入期间改过的提示词' }],
     });
@@ -1616,10 +1622,66 @@ describe('第五轮(合后自查)的回归', () => {
     writeFixture(projectDir, fixture.project);
 
     const example = JSON.parse(DEFAULT_PATCH_EXAMPLE) as PatchOp[];
-    const patched = patchProject(projectDir, readProject(projectDir), {
+    const patched = patchProject(projectDir, {
       baseHash: projectHash(readProject(projectDir)),
       patch: example,
     });
     expect(patched.project.shots[0]!.generation.prompt).toBe('改成你要的画面描述');
   }, 60_000);
+});
+
+/**
+ * 写锁(第六轮审查的回归):工程写者不止一个进程 —— dsh 容器里的面板、机器人进程里的 CLI、
+ * 面板拉起的渲染回写都会写同一条工程。「锁内读-改-写」是这层的互斥,旧行为(没锁)下
+ * 两个进程可以同时进「读 → 算 → 写」,后写的把先写的整份盖掉。
+ */
+describe('工程写锁(跨进程互斥)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-lock-'));
+
+  maybe('锁被别的进程占着(新锁)→ 等到超时抛 PROJECT_BUSY,不静默写', async () => {
+    const projectDir = join(dir, 'project-locked');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    // 冒充另一个活着的写者:锁文件在,而且年龄是新的(没到废锁线,不许抢)。
+    writeFileSync(lockFileOf(projectDir), '999999 2399-01-01T00:00:00.000Z\n');
+
+    const code = ((): string | null => {
+      try {
+        updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+    expect(code).toBe('PROJECT_BUSY');
+    // 拒了就是一点都没写:revision 还是夹具那份(旧行为会照写不误)。
+    expect(readProject(projectDir).revision).toBe(fixture.project.revision);
+  }, 30_000);
+
+  maybe('废锁(持有者崩了)→ 抢过来继续干,不把后面的写者卡死', async () => {
+    const projectDir = join(dir, 'project-stale-lock');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    // 崩掉的进程留下的锁:文件在,但已经很旧了。
+    writeFileSync(lockFileOf(projectDir), '999999 2000-01-01T00:00:00.000Z\n');
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lockFileOf(projectDir), old, old);
+
+    const next = updateProject(projectDir, (current) => ({
+      ...current,
+      revision: current.revision + 1,
+      parentHash: projectHash(current),
+    }));
+    expect(next.revision).toBe(fixture.project.revision + 1);
+    // 干完把锁放掉,别让下一个写者撞废锁。
+    expect(existsSync(lockFileOf(projectDir))).toBe(false);
+  }, 30_000);
+
+  maybe('正常写完不留锁:锁文件随写随消', async () => {
+    const projectDir = join(dir, 'project-lock-release');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+    expect(existsSync(lockFileOf(projectDir))).toBe(false);
+  }, 30_000);
 });

@@ -11,7 +11,7 @@
  * **除夹具外一律走 `updateProject`** —— 它是唯一带跨进程互斥与乐观复核的写路径。
  */
 
-import { closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 import { VidroomError } from './errors.js';
 import { probeMedia, sha256File, type MediaTools, type Probe } from './media.js';
@@ -117,10 +117,11 @@ export function lockFileOf(dir: string): string {
  * 文件系统给的原子占位,失败方等一小会儿;持有者崩了(锁文件没人管了)靠「年龄 + pid 已死」判废锁,
  * 不会永久卡死。
  *
- * 锁文件里写的是 `<令牌> <pid>`:令牌用来认自己 —— 释放与「我还持有吗」都靠它,废锁被抢走后
- * 原来的持有者不会再删别人的锁;pid 用来判持有者死活 —— 只要它还活着,哪怕卡了 30 秒也不抢。
+ * 锁文件里写的是 `<令牌> <pid>`,而且是「先写满内容、再原子挂上去」:占位用 `link`(带 `O_EXCL` 的语义,
+ * 目标已在就失败),别人看不到「位占上了、内容还没写」的空壳。令牌用来认自己 —— 释放与「我还持有吗」都靠它,
+ * 废锁被抢走后原来的持有者不会再删别人的锁;pid 用来判持有者死活 —— 只要它还活着,哪怕卡了 30 秒也不抢。
  * `run` 拿到一个 `assertOwned`(写进盘之前调一次):自己那把锁中途被抢走时,宁可回 `PROJECT_BUSY`
- * 也不往下写 —— 这一步是保底:哪怕锁文件被人手工删了、没了,也不可能两个写者同时落盘。
+ * 也不往下写 —— 这一步是保底:哪怕锁文件被人手工删了、换主了,也不会有两个写者同时落盘。
  */
 export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) => T): T {
   const lock = lockFileOf(dir);
@@ -141,15 +142,18 @@ export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) =
 /** 锁文件里的内容:`<令牌> <pid>`(内容与同一性的读法见 `viewLock`)。 */
 /**
  * 那个 pid 还活着吗。只有 `ESRCH` 算死;`EPERM` 是活着但不同用户,一样算活。
- * pid 读不出来(-1)算「说不清」,不当死处理 —— 宁可知难而退报忙,也不抢一把不知道主人的锁。
+ * pid ≤ 0 当作「没这个数」—— 由 `staleEnough` 按无主处理,不是在这里当活人。
  *
- * 前提(不是保证,是这条实现依赖的部署事实):写者都在同一个 PID 命名空间里 —— 本批就是
- * 插件、面板 HTTP、渲染回写都跑在同一个 dsh 容器里。哪天有了跨命名空间的写者,
- * `kill(pid, 0)` 会认不出那个活进程,「不许抢活锁」这条就不成立;那时要么别跳命名空间写,
- * 要么换 `flock` 这类由内核判归属的锁(本仓现在没有,Node 核心也没暴露)。
+ * 两条前提(不是保证,是这条实现依赖的部署事实):
+ * ①写者都在同一个 PID 命名空间里 —— 本批就是插件、面板 HTTP、渲染回写都跑在同一个 dsh 容器里;
+ *   哪天有了跨命名空间的写者,`kill(pid, 0)` 会认不出那个活进程,"不许抢活锁"就不成立。
+ * ②pid 会被复用 —— 死掉那个号被无关进程顶上时,这把废锁会被当成「有活主人」而留着不回收,
+ *   后果是**卡到那个进程退出为止的 `PROJECT_BUSY`**,不是两个写者同时写(可用性问题,不是正确性)。
+ * 要彻底免掉这两条得换 `flock` 这类由内核判归属的锁:Node 核心没暴露,本仓也没有,
+ * 所以不隐式加依赖,只在注释与 PR 里写明边界。
  */
 function pidAlive(pid: number): boolean {
-  if (pid <= 0) return true;
+  if (pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -189,15 +193,13 @@ function sameLock(a: LockView, b: LockView): boolean {
 /**
  * 算不算「废锁」:年龄超过 `LOCK_STALE_MS`,**而且**写锁那个进程已经没了。
  *
- * ②是关键:只要持有者还活着,哪怕它卡了 30 秒也不抢 —— 「看完再删」这类写法真正的坑是
- * 「看的时候还废着、删的时候那把已经换成新持有者的活锁」。没主人(建了一半就崩、
- * 别的工具写的)也算废:它没写成功过,谁也认不出它;要真有个卡在 open 与写入之间的写者,
- * 它落盘前的 `assertOwned` 也会发现路径上不是自己的令牌,不会写。
+ * ②是关键:只要持有者还活着(pid 有效且在跑),哪怕它卡了 30 秒也不抢。没主人(建了一半就崩、
+ * 内容读不出来、pid 无效)也算废:它没写成功过,谁也认不出它。
  */
 function staleEnough(view: LockView): boolean {
   if (Date.now() - view.mtimeMs <= LOCK_STALE_MS) return false;
   if (view.token === undefined) return true;
-  return view.pid !== undefined && !pidAlive(view.pid);
+  return view.pid === undefined || !pidAlive(view.pid);
 }
 
 /** 我这把锁还在不在自己手里 —— 不在就不能往下写(回 `PROJECT_BUSY`,让人重来)。 */
@@ -213,8 +215,8 @@ function assertOwned(lock: string, token: string): void {
 /**
  * 放锁:只在「读到的就是我的令牌」时删。
  *
- * 读不出内容(新持有者刚 `O_EXCL` 建好、还没写进去)或读到别人的令牌,都什么都不动 ——
- * 那一刻按路径删一个文件,删掉的可能是别人刚占上的位。放不掉自己那把只是让锁晚一点被回收
+ * 读不出内容、或读到别人的令牌,都什么都不动 —— 那一刻按路径删一个文件,删掉的可能是别人刚占上的位
+ * (我们自己的锁不会是这个形态:占位是先写满内容再挂上去的)。放不掉自己那把只是让锁晚一点被回收
  * (过期 + 我的 pid 没了),比替别人开门强。`ENOENT` 当成已经被清过。
  */
 function releaseLock(lock: string, token: string): void {
@@ -230,6 +232,20 @@ function releaseLock(lock: string, token: string): void {
   }
 }
 
+/** 把 `claim` 挂回锁名上:只在锁名空着时成功(`link` 不覆盖),放不回去就把 claim 丢掉。 */
+function putBack(claim: string, lock: string): void {
+  try {
+    linkSync(claim, lock);
+  } catch {
+    // 这期间又有写者占了位:只能丢掉手里这把 —— 它的 assertOwned 会拦住原持有者写。
+  }
+  try {
+    unlinkSync(claim);
+  } catch {
+    // 已经没了。
+  }
+}
+
 /**
  * 清掉一把废锁:只看一次、只搬一次。
  *
@@ -237,7 +253,10 @@ function releaseLock(lock: string, token: string): void {
  * (dev/ino/mtime)核对搬的确实是我刚才看的那把 —— 万一这中间持有者自己放掉、别人又建了新的活锁,
  * 核对就不通过,原样放回去。核对通过才删。
  *
- * 返回 `true` 只表示「这把废锁我清掉了」,不表示「我拿到锁了」—— 占位永远要重新 `O_EXCL`。
+ * 注意「放回去」不能用 `rename`(`rename` 会盖掉同名的活锁 —— 那正好又成了两个写者),
+ * 用 `link` 不许覆盖:锁名空着才放得回,否则丢掉手里这把。
+ *
+ * 返回 `true` 只表示「这把废锁我清掉了」,不表示「我拿到锁了」—— 占位永远要重新挂一次。
  */
 function clearStaleLock(lock: string, token: string): boolean {
   const seen = viewLock(lock);
@@ -251,17 +270,8 @@ function clearStaleLock(lock: string, token: string): boolean {
   }
   const grabbed = viewLock(claim);
   if (grabbed === undefined || !sameLock(seen, grabbed)) {
-    // 搬错了手(这中间锁换过主):原样放回去。
-    try {
-      renameSync(claim, lock);
-    } catch {
-      // 放不回去 = 这期间又有写者占了位:把这把丢掉(它的 `assertOwned` 会拦住它写)。
-      try {
-        unlinkSync(claim);
-      } catch {
-        // 已经没了。
-      }
-    }
+    // 搬错了手(这中间锁换过主):放回去,但不许盖。
+    putBack(claim, lock);
     return false;
   }
   try {
@@ -273,39 +283,30 @@ function clearStaleLock(lock: string, token: string): boolean {
 }
 
 /**
- * 占位,成不成就在这一下:`O_EXCL` 建出来就是我的。
+ * 占位:先把整份内容写进一个旁人不知道的临时名,再用 `link` 一次性挂到锁名上。
  *
- * 建出来之后内容写不进去 = 这个壳我不要了,当场清掉再报错:留个没主人的空壳在后面能靠
- * 「过期 + 没主人」回收,但那要等 `LOCK_STALE_MS`,不如自己收干净。
+ * `link` 在目标已存在时失败(`EEXIST`)—— 就是 `O_EXCL` 的语义,但不留「占上了、内容还没写」的空壳:
+ * 挂上去的那一刻内容就是完整的。别人看到的锁要么没有,要么就是一把认得出主人的锁。
  */
 function createLockFile(lock: string, token: string): boolean {
-  let fd: number;
+  const staging = `${lock}.new-${token}`;
+  writeFileSync(staging, `${token} ${process.pid}\n`, 'utf8');
   try {
-    fd = openSync(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+    linkSync(staging, lock);
+    return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw error;
-  }
-  try {
-    writeSync(fd, `${token} ${process.pid}\n`);
-  } catch (error) {
-    try {
-      unlinkSync(lock);
-    } catch {
-      // 壳已经没了。
-    }
     throw new VidroomError(
       'IO_ERROR',
-      `工程写锁占上了但写不进内容(${(error as Error).message}),这次不写:${lock}`,
+      `工程写锁没占上(${(error as Error).message}),这次不写:${lock}`,
     );
   } finally {
     try {
-      closeSync(fd);
+      unlinkSync(staging);
     } catch {
-      // fd 关不掉:壳里已经是我的令牌,走正常的过期回收。
+      // 临时名没清掉:它不叫锁名,挡不着任何人。
     }
   }
-  return true;
 }
 
 /**

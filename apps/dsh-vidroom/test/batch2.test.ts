@@ -1752,7 +1752,8 @@ describe('工程写锁(跨进程互斥)', () => {
     const code = ((): string | null => {
       try {
         updateProject(projectDir, (current) => {
-          // 另一个进程刚 `O_EXCL` 建好、内容还没落:这时按路径删它,就是替第三个写者开门。
+          // 别的东西在这当口换了一把锁:里面还是别人的令牌(或根本没内容)。按路径删它,
+          // 就是替第三个写者开门。
           writeFileSync(lockFileOf(projectDir), '');
           return { ...current, revision: current.revision + 1 };
         });
@@ -1812,10 +1813,40 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(existsSync(lock)).toBe(false);
   }, 60_000);
 
+  it('两个进程同时改同一条工程 → 一次写都不丢(锁是跨进程串行的)', async () => {
+    const projectDir = seedProject('project-lock-race');
+    const before = readProject(projectDir);
+    const rounds = 30;
+    const outs = [join(dir, 'race-0.out'), join(dir, 'race-1.out')];
+    // 子进程要 import 到 src/*.ts,所以第二个进程也走 vitest(它自己解析 TS)而不是裸 node。
+    const raceEnv = (index: number) => ({
+      ...process.env,
+      VR_LOCK_RACE_DIR: projectDir,
+      VR_LOCK_RACE_ROUNDS: String(rounds),
+      VR_LOCK_RACE_OUT: outs[index] ?? '',
+    });
+    await Promise.all(
+      outs.map((_, index) =>
+        run('corepack', ['pnpm', 'exec', 'vitest', 'run', 'test/lock-race-child.test.ts'], {
+          cwd: process.cwd(),
+          env: raceEnv(index),
+          maxBuffer: 8 * 1024 * 1024,
+        }),
+      ),
+    );
+
+    const written = outs.map((file) => Number.parseInt(readFileSync(file, 'utf8').trim(), 10));
+    // 两边都真写过(否则这条测不到任何并发),而且一次都没丢:总数 = 最终 revision 的增量 ——
+    // 两次写并进同一个临界区时,后写的那份会把先写的删掉,这条就对不上。
+    expect(written).toEqual([rounds, rounds]);
+    expect(readProject(projectDir).revision).toBe(before.revision + rounds * 2);
+  }, 180_000);
+
   it('建了一半留下的空锁(没主人、已过期)→ 当废锁回收:不需要人去手动删', () => {
     const projectDir = seedProject('project-headless-lock');
     const before = readProject(projectDir);
-    // open(O_EXCL) 成功、还没写进内容就崩了:文件在,里面什么都没有。
+    // 位占上了、里面什么都没有(别的工具写的,或早先版本崩在写入之间):现在自己的占位是
+    // 「先把整份内容写进临时名、再 link 上去」,不会留下这个形态。
     writeFileSync(lockFileOf(projectDir), '');
     const old = new Date(Date.now() - 120_000);
     utimesSync(lockFileOf(projectDir), old, old);
@@ -1829,5 +1860,24 @@ describe('工程写锁(跨进程互斥)', () => {
     // 自己那把放掉了,抢废锁用的那个临时名字也收拾干净了。
     expect(existsSync(lockFileOf(projectDir))).toBe(false);
     expect(readdirSync(projectDir).filter((name) => name.includes('.lock'))).toEqual([]);
+  }, 30_000);
+
+  it('过期的锁里 pid 读不出数(或不是正数)→ 没人能认领它,当废锁回收', () => {
+    const projectDir = seedProject('project-bad-pid-lock');
+    const before = readProject(projectDir);
+    // 这两个形态旧写法不会回收:一处把读不出的 pid 当成「说不清」而永远算活着,
+    // 结果这把锁卡到天荒地老,后面的写者只能一直 PROJECT_BUSY。
+    for (const content of ['half-written-token\n', 'token-without-pid -7\n']) {
+      writeFileSync(lockFileOf(projectDir), content);
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(lockFileOf(projectDir), old, old);
+      const next = updateProject(projectDir, (current) => ({
+        ...current,
+        revision: current.revision + 1,
+        parentHash: projectHash(current),
+      }));
+      expect(next.revision).toBeGreaterThan(before.revision);
+      expect(existsSync(lockFileOf(projectDir))).toBe(false);
+    }
   }, 30_000);
 });

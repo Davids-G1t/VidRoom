@@ -1,0 +1,73 @@
+{
+  "name": "dsh-vidroom",
+  "version": "0.1.0",
+  "description": "把本地 MiniMax H3 出片与工作流库带进 DeepSeek Harness:一个出片工具、一个工作流库面板、全中文。桌面壳、ComfyUI 管理、聊天都交给宿主,本插件只做 VidRoom 那部分。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "workflows",
+    "client",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown -c tsdown.config.mjs",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "tsdown -c tsdown.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "vitest run",
+    "prepack": "tsc -p tsconfig.json && tsdown -c tsdown.config.mjs"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "vidroom",
+    "minimax-h3",
+    "comfyui",
+    "video-generation"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.2.0",
+    "react": "^19.2.0",
+    "tsdown": "^0.22.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  }
+}

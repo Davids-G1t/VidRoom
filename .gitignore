@@ -1,7 +1,6 @@
 node_modules/
 dist/
-release/
-test-results/
-playwright-report/
+lib/
+client/
 *.tsbuildinfo
-.test-tmp/
+*.tgz

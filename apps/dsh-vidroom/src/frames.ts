@@ -10,7 +10,9 @@
 export const H3_FPS = 24;
 /** 网格下界。 */
 export const H3_MIN_FRAMES = 5;
-/** 网格上界:官方训练覆盖约 124–362 帧(约 5–15 秒),更长官方写的是「未测试」。 */
+/** 网格上界。官方口径的上界:124–362 帧(约 5–15 秒),更长是「未测试」。
+ * 网格与覆盖范围见 ComfyUI-MiniMaxH3-Tools 的 README(社区整理,非官方一手):
+ * https://github.com/Rinne414/ComfyUI-MiniMaxH3-Tools/blob/master/README.md */
 export const H3_MAX_FRAMES = 362;
 
 /** 是否落在 17k+5 网格上。 */

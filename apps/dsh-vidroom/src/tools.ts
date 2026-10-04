@@ -125,7 +125,7 @@ export function registerVidroomTools(ctx: HostContext, runtime: VidroomRuntime):
     description: [
       '用本机 ComfyUI 上的 MiniMax H3 出一段带声音的视频(本地生成,不走云端)。',
       '给一句 prompt(或 topic),可选 seconds(秒,默认 5,上限 15)、megapixels(百万像素,默认 0.4)、aspect(默认 "16:9")、seed(复现)。',
-      '秒数会被吸附到 H3 的 17k+5 帧网格(说 7 秒给 169 帧);宽高由像素预算与长宽比算出并对齐 32 的倍数。',
+      '秒数会被吸附到 H3 的 17k+5 帧网格(说 7 秒给 175 帧);宽高由像素预算与长宽比算出并对齐 32 的倍数。',
       '出片是分钟级;返回里带 ComfyUI 的 prompt_id、产物文件名与播放地址。',
       '先跑 vidroom_workflows action: list 看本机状态(ComfyUI 地址、显存、是否放行)。',
     ].join(' '),

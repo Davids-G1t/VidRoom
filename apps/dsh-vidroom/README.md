@@ -5,7 +5,8 @@
 桌面壳、ComfyUI 的起停、聊天会话全交给宿主;这个插件只做 VidRoom 那一小块:
 **一句话主题 → 交给本地 ComfyUI 上的 MiniMax H3 出一条短视频**,外加一个能列出、能读原文、能点运行的工作流库面板。
 
-生成用的显卡、ComfyUI 与 H3 权重都在你自己的机器上,插件不联网、不上传素材、不带任何密钥。
+生成用的显卡、ComfyUI 与 H3 权重都在你自己的机器上:插件只连你配置的那个 ComfyUI 地址(`baseUrl`),
+不访问任何第三方云端、不上传素材、不带任何密钥。
 
 ## 装
 
@@ -35,7 +36,7 @@ dsh plugin --profile <profile> remove dsh-vidroom
 
 | 工具 | 干什么 | 主要参数 |
 | --- | --- | --- |
-| `vidroom_generate` | 一句话主题直接出片,等到产物落地才返回 | `prompt`(或 `topic`)、`seconds`、`megapixels`、`aspect`、`seed`、`workflow` |
+| `vidroom_generate` | 一句话主题直接出片,等到产物落地才返回 | `prompt`(或 `topic`)、`seconds`、`megapixels`、`aspect`、`seed` |
 | `vidroom_workflows` | 工作流库:`list` 列、`read` 读 SKILL.md 原文、`run` 按工作流跑 | `action`、`slug`、`topic` |
 
 两个工具都**只回路径与元数据,不回灌二进制**;产物地址是 ComfyUI 的 `/view` 播放链接,
@@ -52,25 +53,31 @@ dsh plugin --profile <profile> remove dsh-vidroom
 
 ## 工作流库
 
-一份工作流 = `workflows/<slug>/SKILL.md`,YAML frontmatter 里写步骤,正文是给人和 agent 读的说明:
+一份工作流 = `workflows/<slug>/SKILL.md`:frontmatter 写元信息,**正文里一个 ```workflow 代码块**写步骤:
 
-```yaml
+````markdown
 ---
-title: 主题直出
-description: 一句主题 → 一条 H3 短视频
+name: two-shots
+title: 两镜拼接
+description: 一句主题 → 两个镜头
+---
+
+正文是给人和 agent 读的说明:这条工作流干什么、什么时候用。
+
+```workflow
 steps:
   - id: first
     tool: generate_video
-    args:
-      prompt: "{{topic}},自然光,浅景深"
+    args: { prompt: "{{topic}},自然光,浅景深", seconds: 5, megapixels: 0.4, aspect: "16:9" }
   - id: second
     tool: generate_video
     each: "{{first.outputs}}"
-    args:
-      prompt: "接在 {{item.filename}} 后面再走一步的镜头"
----
+    args: { prompt: "接在 {{item.filename}} 后面再走一步的镜头" }
 ```
+````
 
+- 目录名(slug)必须**等于** frontmatter 里的 `name`;缺 `name`、缺 ```workflow 代码块、步骤里写不认识的字
+  都在解析时报错,不会静默跳过。`builtin: true` 标记它是随包发的那几份。
 - `{{topic}}` 拿到用户给的主题;`{{<步骤id>.outputs}}` 拿到那一步的全部产物(配 `each` 展开),
   `{{<步骤id>.ids}}` 拿到全部 prompt id,`{{<步骤id>.url}}` / `.filename` 拿到第一个产物。
 - 这一批只实现 `generate_video` 一种步骤;写别的 tool 会在解析/执行时报错,不会静默跳过。
@@ -88,9 +95,8 @@ steps:
 | `pollIntervalMs` | `1000` | 等产物时的轮询间隔(毫秒,200–10000) |
 | `allowExperimental` | `false` | 显存 15–24 GiB 时是否放行(见下) |
 
-显存准入:≥24 GiB 默认放行;15–24 GiB 算实验档,要显式开 `allowExperimental`
-(或环境变量 `VIDROOM_H3_EXPERIMENTAL=1`)才放行;不到 15 GiB 直接不放行。
-档位不合适时错误信息里会写清是显存不够还是没开实验档 —— 不会闷头跑,也不会假装能跑。
+显存准入:≥24 GiB 默认放行;15–24 GiB 算实验档,要显式开 `allowExperimental` 才放行;
+不到 15 GiB 直接不放行。档位不合适时错误信息里会写清是显存不够还是没开实验档 —— 不会闷头跑,也不会假装能跑。
 
 ## 它不做什么
 

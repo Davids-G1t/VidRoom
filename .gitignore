@@ -1,7 +1,7 @@
 node_modules/
 dist/
 lib/
-client/
+apps/dsh-vidroom/client/
 *.tsbuildinfo
 *.tgz
 .test-tmp/

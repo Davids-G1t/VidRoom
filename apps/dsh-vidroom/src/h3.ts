@@ -74,15 +74,6 @@ export function buildH3Prompt(params: H3Params): ApiPrompt {
   return graph;
 }
 
-/** /prompt 的完整请求体。 */
-export function buildPromptRequest(params: H3Params, clientId: string) {
-  return {
-    prompt: buildH3Prompt(params),
-    client_id: clientId,
-    extra_data: { extra_pnginfo: { comment: AI_GENERATED_TAG } },
-  };
-}
-
 /** 随机种子。 */
 export function randomSeed(): number {
   return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);

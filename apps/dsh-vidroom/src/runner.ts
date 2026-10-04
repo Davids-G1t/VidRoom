@@ -88,7 +88,7 @@ export interface RunOptions {
 }
 
 /** 一步的产物在后续步骤里的形状:`<步骤id>` 拿到 `{ id, …字段 }`,`<步骤id>.ids` 拿到全部 id。 */
-function stepOutput(id: string, results: GenerateResult[]): Record<string, unknown> {
+function stepOutput(results: GenerateResult[]): Record<string, unknown> {
   const first = results[0];
   return {
     id: first?.promptId,
@@ -128,7 +128,7 @@ export async function runWorkflow<T extends GenerateResult>(
         results.push(await call(readGenerateArgs(step.args, itemScope, `${where}[${itemIndex}]`)));
       }
     }
-    scope.steps[step.id] = stepOutput(step.id, results);
+    scope.steps[step.id] = stepOutput(results);
     all.push(...results);
   }
   return { steps: scope.steps, results: all };

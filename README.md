@@ -27,7 +27,7 @@ dsh plugin --profile desktop add "$PWD/apps/dsh-vidroom"
 
 真正的视频生成全部跑在 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)(GPL-3.0)里:它作为独立进程运行,
 插件只通过它自带的 HTTP API 提交工作流、轮询、取回产物。ComfyUI 与模型权重都**不随本仓分发**,
-也不进这个仓的源码树;插件不对局域网开放任何端口,自己也不联网。
+也不进这个仓的源码树;插件不对局域网开放任何端口,除了你配置的那个 ComfyUI 地址之外不访问任何第三方。
 
 插件因此可以保持 Apache-2.0,不受 ComfyUI 的 GPL-3.0 传染 —— **这是常见做法,不是法律意见**,
 采用的是 [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI)、[Krita AI Diffusion](https://github.com/Acly/krita-ai-diffusion) 等项目的先例。

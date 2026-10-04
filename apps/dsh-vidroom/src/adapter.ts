@@ -51,8 +51,6 @@ export interface CapabilityInput {
   reachable: boolean;
   admissionAllowed: boolean;
   admissionReason: string;
-  comfyuiVersion?: string;
-  ffmpegVersion?: string;
 }
 
 /** 端上参数快照。`localReady` 只要有一项不满足就是 false,理由写在 reasons 里。 */

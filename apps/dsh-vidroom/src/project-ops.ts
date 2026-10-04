@@ -23,6 +23,7 @@ import {
   type AnalysisShot,
   type Asset,
   type Budget,
+  type Candidate,
   type PatchOp,
   type Project,
 } from './project.js';
@@ -608,7 +609,7 @@ export function markRunning(dir: string): () => void {
   return () => IN_FLIGHT.delete(key);
 }
 
-/** 面板点渲染:立刻返回,真正跑在后台,进度靠 jobView 轮询。 */
+/** 面板 / 工具点渲染:校验完就回 `runId`,生成与合成在后台跑,进度靠 `jobView` 轮询。 */
 export async function startRender(
   runtime: VidroomRuntime,
   request: {
@@ -618,26 +619,103 @@ export async function startRender(
     /** 计划哈希:必填 —— 没冻结的计划不开工。 */
     planHash: string;
     budget?: Partial<Budget> | undefined;
+    /** 只在真跑时收尾调用(用于测试/集成的清理钩子)。 */
+    onSettled?: (() => void) | undefined;
   },
 ): Promise<{ runId: string; mode: string }> {
-  const { renderProject } = await import('./render.js');
+  const { prepareRun, runPrepared } = await import('./render.js');
   const project = readProject(request.dir);
   const release = markRunning(request.dir);
+  let prepared: Awaited<ReturnType<typeof prepareRun>>;
   try {
-    const result = await renderProject(runtime, project, {
+    // 校验是同步的(哈希 / 计划 / 预算 / 权重锁):不合格当场抛,调用方拿到错误而不是一个空 runId。
+    // 真跑是分钟级 —— 挂在这里等会让面板的 HTTP 请求和工具调用一起超时。
+    prepared = await prepareRun(runtime, project, {
       dir: request.dir,
       target: request.mode === 'compose' ? 'final' : 'candidates',
       ...(request.expectedProjectHash === undefined ? {} : { expectedProjectHash: request.expectedProjectHash }),
       planHash: request.planHash,
       ...(request.budget === undefined ? {} : { budget: request.budget }),
     });
-    return { runId: result.runId, mode: request.mode };
-  } finally {
+  } catch (error) {
     release();
+    throw error;
   }
+  void runPrepared(runtime, prepared)
+    .catch(() => {
+      // 失败已经写进回执(状态 failed + 错误原文),这里只负责不要冒泡成未处理拒绝。
+    })
+    .finally(() => {
+      release();
+      request.onSettled?.();
+    });
+  return { runId: prepared.runId, mode: request.mode };
 }
 
 /** 候选 id 生成器(面板手工登记候选时用,和 render 里同一套前缀)。 */
 export function candidateId(existing: Iterable<string>): string {
   return nextId('cand', existing);
+}
+
+/** 本机一个文件 → 工程资产(算 sha256、读探针、复制进 `assets/`),登记完立即回写工程。 */
+export async function importProjectAsset(
+  config: Config,
+  dir: string,
+  input: { sourcePath: string; kind: Asset['kind']; origin?: Asset['origin'] },
+): Promise<{ asset: Asset; projectHashAfter: string }> {
+  const current = readProject(dir);
+  const asset = await importAsset(dir, {
+    sourcePath: input.sourcePath,
+    kind: input.kind,
+    origin: input.origin ?? 'local',
+    existingIds: current.assets.map((item) => item.id),
+    tools: mediaTools(config),
+  });
+  const next = validateProject({
+    ...current,
+    revision: current.revision + 1,
+    parentHash: projectHash(current),
+    assets: [...current.assets, asset],
+  });
+  writeProject(dir, next);
+  return { asset, projectHashAfter: projectHash(next) };
+}
+
+/** 用工程里已有的视频资产手工登记一条候选(不重新生成)。 */
+export function registerCandidate(
+  dir: string,
+  input: { shotId: string; assetId: string; seed?: number | undefined; select?: boolean | undefined },
+): { candidate: Candidate; projectHashAfter: string } {
+  const current = readProject(dir);
+  const shot = current.shots.find((item) => item.id === input.shotId);
+  if (shot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${input.shotId}`);
+  const asset = current.assets.find((item) => item.id === input.assetId);
+  if (asset === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有资产 ${input.assetId}`);
+  const probe = asset.probe;
+  const candidate: Candidate = {
+    id: candidateId(current.candidates.map((item) => item.id)),
+    shotId: input.shotId,
+    assetId: input.assetId,
+    recipeHash: asset.sha256.slice(0, 16),
+    ...(input.seed === undefined ? {} : { seed: input.seed }),
+    actual: {
+      width: probe?.width ?? 0,
+      height: probe?.height ?? 0,
+      fps: probe?.fps ?? { num: 24, den: 1 },
+      frames: probe?.frames ?? 0,
+      audio: probe?.audio ?? false,
+    },
+    status: 'available',
+  };
+  // 候选 id 列表不在白名单 patch 能碰的范围里,这里直接改并写出(仍走 validateProject)。
+  const next = structuredClone(current) as Project;
+  const targetShot = next.shots.find((item) => item.id === input.shotId);
+  if (targetShot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${input.shotId}`);
+  targetShot.candidateIds.push(candidate.id);
+  next.candidates.push(candidate);
+  if (input.select === true) targetShot.selectedCandidateId = candidate.id;
+  next.revision = current.revision + 1;
+  next.parentHash = projectHash(current);
+  writeProject(dir, validateProject(next));
+  return { candidate, projectHashAfter: projectHash(next) };
 }

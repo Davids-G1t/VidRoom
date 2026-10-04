@@ -35,6 +35,9 @@ dsh plugin --profile <profile> remove dsh-vidroom
 
 ## Agent 拿到什么
 
+**工程面工具(`vidroom_reference` 及以下那张表里除前三行外的全部)默认不注册**:参考片、文案、音轨、
+工程内容不进云端对话,要打开配置 `chatTools` 才注册。默认装法下这条链在本地面板的「工程」区里走(见「面板」)。
+
 | 工具 | 干什么 | 主要参数 |
 | --- | --- | --- |
 | `vidroom_generate` | 一句话主题直接出片,等到产物落地才返回 | `prompt`(或 `topic`)、`seconds`、`megapixels`、`aspect`、`seed` |
@@ -50,7 +53,7 @@ dsh plugin --profile <profile> remove dsh-vidroom
 | `vidroom_variants` | 一次调用批量做变体(先 `plan` 再 `run`) | `variants`、`action`、`target`、`budget`、`planHash` |
 | `vidroom_import_asset` / `vidroom_candidate_add` | 把本机文件登记成工程资产 / 手工登记一条已有候选 | `projectPath`、`sourcePath`、`shotId`、`assetId` |
 
-两个工具都**只回路径与元数据,不回灌二进制**;产物地址是 ComfyUI 的 `/view` 播放链接,
+这些工具都**只回路径与元数据,不回灌二进制**;产物地址是 ComfyUI 的 `/view` 播放链接,
 面板靠它放播放器,agent 靠它给用户看。
 
 参数默认值:`seconds=5`、`megapixels=0.4`、`aspect=16:9`(16:9 下 0.4MP = 864×480,0.7MP = 1152×640)。
@@ -80,7 +83,7 @@ dsh plugin --profile <profile> remove dsh-vidroom
 
 | 申请 | 落地情况 |
 | --- | --- |
-| **R1 可检查、可重放的 H3 底座** | 已落:`vidroom_h3` 的 `capabilities` 给参数域/工作流 id 与哈希/本机就绪与缺什么;`run` 按显式参数跑并把参数快照与实测值一起带回;`status` 按 promptId 查真实状态。不支持的种子/尺寸/帧数回 `UNSUPPORTED_PARAMS`,不静默忽略。原 `vidroom_generate` 签名与行为未改。 |
+| **R1 可检查、可重放的 H3 底座** | 已落(工具本身要 `chatTools` 打开才注册):`vidroom_h3` 的 `capabilities` 给参数域/工作流 id 与哈希/本机就绪与缺什么(`projectPath` 可选:给了就连工程锁里的权重哈希一起核,不给只报机器那半);`run` 按显式参数跑并把参数快照与实测值一起带回;`status` 按 promptId 查真实状态。不支持的种子/尺寸/帧数回 `UNSUPPORTED_PARAMS`,不静默忽略。原 `vidroom_generate` 签名与行为未改。 |
 | **R2 带出处的本地素材与剪辑底座** | 已落:`vidroom_assets` 列资产(绝对路径 + 缺件)、`vidroom_import_asset` 登记外部文件、`vidroom_candidate_add` 手工登记候选;生成素材立刻取回并复制进 `assets/` 并登记 sha256,不靠 ComfyUI 内存历史复跑。第 1 批的 runner 未重写;镜头候选索引、词锚编译与工程渲染都在第 2 批(`compose.ts` / `align.ts`)。 |
 | **R3 本地执行与恢复** | 已落:只连回环地址、拒重定向到外网、路径/哈希/模型在执行端校验;job 状态为 `queued/running/succeeded/failed/cancelled`,工程 run 另有 `awaiting-selection/awaiting-alignment`;按 promptId 查既有任务(未知状态如实报待核,不自动重投);缺 ffmpeg/权重不自动下载;H3 的准入与「AI-generated with MiniMax H3」标名照旧。 |
 
@@ -88,6 +91,11 @@ dsh plugin --profile <profile> remove dsh-vidroom
 
 侧栏 VidRoom 面板里能:看当前连的 ComfyUI 地址与这台机器的显存/准入档位、列内置工作流、
 展开 SKILL.md 原文、填主题与档位点运行、看这一轮每一步的进度与产物播放器。
+
+面板的「工程」区是第 2 批的**本地写入口**(工程面工具默认没注册,这条链靠它走完):造工程、
+登记本地参考片、按白名单 JSON Patch 改工程(文案/提示词/种子/选候选/样式)、把本机文件导成工程资产、
+手工登记候选、算候选/合成计划并按冻结的计划渲染、校订词窗;渲染是后台跑的,回来的是 `runId`,进度与回执
+在下面每 3 秒自刷。写路由与聊天工具调的是同一套 `project-ops.ts`,没有第二份实现。
 
 ## 工作流库
 
@@ -133,6 +141,9 @@ steps:
 | `pollIntervalMs` | `1000` | 等产物时的轮询间隔(毫秒,200–10000) |
 | `allowExperimental` | `false` | 显存 15–24 GiB 时是否放行(见下) |
 | `projectsRoot` | `~/VidRoom/projects` | 不给 `projectPath` 时新工程落哪(第 2 批) |
+| `modelsRoot` | `~/Apps/vidroom/models` | H3 权重所在目录:核工程锁里的权重哈希、算本地就绪都看这里 |
+| `ffmpegPath` / `ffprobePath` | `ffmpeg` / `ffprobe` | 探测与合成的可执行文件;缺了不自动下载,报错里说清缺哪个 |
+| `chatTools` | `false` | 是否把工程面工具注册进聊天。默认关 —— 参考片/文案/工程内容不进云端对话;关着时走本地面板 |
 
 显存准入:≥24 GiB 默认放行;15–24 GiB 算实验档,要显式开 `allowExperimental` 才放行;
 不到 15 GiB 直接不放行。档位不合适时错误信息里会写清是显存不够还是没开实验档 —— 不会闷头跑,也不会假装能跑。

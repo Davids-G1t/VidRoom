@@ -6,16 +6,35 @@
  * 聊天侧那批工程工具默认不注册(`chatTools` 打开才注册,见 `config.ts`),所以面板不是可有可无的装饰。
  */
 import { createElement as h, useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getJson, unwrap } from './api.ts';
+import { getJson, postJson, unwrap } from './api.ts';
 
 interface ProjectView {
   projectPath: string;
   projectId: string;
   revision: number;
+  projectHash: string;
   counts: Record<string, number>;
   issues: string[];
   alignmentIssues: string[];
   reference?: { assetId: string; analysisStatus: string; shots: number };
+}
+
+interface ShotView {
+  id: string;
+  order: number;
+  segmentId?: string;
+  selectedCandidateId?: string;
+}
+
+interface PlanView {
+  target: string;
+  planHash: string;
+  projectHash: string;
+  ready: boolean;
+  blockers: string[];
+  newRequests: number;
+  reuseCandidateIds: string[];
+  summary: string;
 }
 
 interface CandidateView {
@@ -45,6 +64,7 @@ interface ProjectPayload {
   candidates: CandidateView[];
   missingAssets: string[];
   runs: RunSummary[];
+  shots: ShotView[];
 }
 
 interface AssetPayload {
@@ -77,6 +97,331 @@ function player(item: AssetItem, dir: string): ReactNode {
   if (item.kind === 'audio') return h('audio', { className: 'dvr-media', src: url, controls: true });
   if (item.kind === 'image') return h('img', { className: 'dvr-media', src: url, alt: item.path });
   return null;
+}
+
+/** 一行输入。面板里的排版一律走 class,不用内联 style。 */
+function field(
+  label: string,
+  value: string,
+  onChange: (next: string) => void,
+  placeholder = '',
+): ReactNode {
+  return h(
+    'div',
+    { className: 'dvr-field' },
+    h('label', {}, label),
+    h('input', {
+      className: 'dvr-input',
+      value,
+      placeholder,
+      onChange: (event: { currentTarget: { value: string } }) => onChange(event.currentTarget.value),
+    }),
+  );
+}
+
+function area(label: string, value: string, onChange: (next: string) => void): ReactNode {
+  return h(
+    'div',
+    { className: 'dvr-field' },
+    h('label', {}, label),
+    h('textarea', {
+      className: 'dvr-input dvr-textarea',
+      value,
+      rows: 4,
+      onChange: (event: { currentTarget: { value: string } }) => onChange(event.currentTarget.value),
+    }),
+  );
+}
+
+/**
+ * 工程写入口:造工程、改工程(patch)、导素材、手工登记候选、算计划、真渲染、校词窗。
+ *
+ * 这一段是第 2 批「复刻一条爆款」在本机的全流程:聊天侧那批工具默认不注册,
+ * 所以面板必须自己能把从参考片到成片这条链走完 —— 只读面板等于这条链在默认装法下走不通。
+ * 全部走同源 POST,与工具面共用同一套 ops(`project-ops.ts`),没有第二份实现。
+ */
+function ProjectActions(props: {
+  dir: string;
+  baseHash: string;
+  shots: ShotView[];
+  assets: AssetItem[];
+  reload: () => Promise<void>;
+}): ReactNode {
+  const { dir, baseHash, shots, assets, reload } = props;
+  const [note, setNote] = useState('');
+  const [problem, setProblem] = useState('');
+  const [plan, setPlan] = useState<PlanView | undefined>(undefined);
+  const [newProjectId, setNewProjectId] = useState('');
+  const [referencePath, setReferencePath] = useState('');
+  const [referenceUrl, setReferenceUrl] = useState('');
+  const [patchText, setPatchText] = useState('[{ "op": "replace", "path": "/shots/0/text", "value": "新文案" }]');
+  const [importPath, setImportPath] = useState('');
+  const [importKind, setImportKind] = useState('video');
+  const [shotId, setShotId] = useState('');
+  const [assetId, setAssetId] = useState('');
+  const [selectNow, setSelectNow] = useState(true);
+  const [alignSegmentId, setAlignSegmentId] = useState('');
+  const [alignAssetId, setAlignAssetId] = useState('');
+  const [alignAudioHash, setAlignAudioHash] = useState('');
+  const [alignScriptHash, setAlignScriptHash] = useState('');
+  const [windowsText, setWindowsText] = useState('[{"tokenId":"0","startFrame":0,"endFrame":12}]');
+
+  /** 每个写动作都走这一层:成功刷工程,失败把原文写在面板上。 */
+  const run = useCallback(
+    async (what: string, work: () => Promise<string>): Promise<void> => {
+      setNote(`${what}:…`);
+      setProblem('');
+      try {
+        setNote(await work());
+        await reload();
+      } catch (issue) {
+        setNote('');
+        setProblem(`${what}:${issue instanceof Error ? issue.message : String(issue)}`);
+      }
+    },
+    [reload],
+  );
+
+  const create = (): Promise<void> =>
+    run('造工程', async () => {
+      const created = unwrap<{ project: ProjectView }>(
+        await postJson('/vidroom/project', { action: 'create', projectId: newProjectId.trim() }),
+      );
+      return `已造工程 ${created.project.projectId}(rev ${created.project.revision}),用上面的下拉选它`;
+    });
+
+  const patch = (): Promise<void> =>
+    run('改工程', async () => {
+      const applied = unwrap<{ changedPaths: string[]; invalidatedShotIds: string[]; alignmentRequired: boolean }>(
+        await postJson('/vidroom/project', {
+          action: 'patch',
+          path: dir,
+          baseHash,
+          patch: JSON.parse(patchText) as unknown,
+        }),
+      );
+      return `改了 ${applied.changedPaths.length} 处${applied.invalidatedShotIds.length === 0 ? '' : `;${applied.invalidatedShotIds.length} 个镜头要重对齐`}${applied.alignmentRequired ? ';对齐已失效,要重校词窗' : ''}`;
+    });
+
+  const registerRef = (): Promise<void> =>
+    run('登记参考片', async () => {
+      const view = unwrap<{ reference: { assetId: string; analysisStatus: string } }>(
+        await postJson('/vidroom/reference', {
+          localPath: referencePath,
+          projectPath: dir,
+          ...(referenceUrl.trim() === '' ? {} : { referenceUrl: referenceUrl.trim() }),
+        }),
+      );
+      return `参考片登记成 ${view.reference.assetId}(${view.reference.analysisStatus})`;
+    });
+
+  const importAsset = (): Promise<void> =>
+    run('导素材', async () => {
+      const imported = unwrap<{ asset: { id: string; path: string } }>(
+        await postJson('/vidroom/import', { path: dir, sourcePath: importPath, kind: importKind, origin: 'local' }),
+      );
+      return `导进来 ${imported.asset.id}(${imported.asset.path})`;
+    });
+
+  const addCandidate = (): Promise<void> =>
+    run('登记候选', async () => {
+      const created = unwrap<{ candidate: { id: string; shotId: string } }>(
+        await postJson('/vidroom/candidate', { path: dir, shotId, assetId, select: selectNow }),
+      );
+      return `候选 ${created.candidate.id} 登记到 ${created.candidate.shotId}${selectNow ? '(已选定)' : ''}`;
+    });
+
+  const align = (): Promise<void> =>
+    run('校词窗', async () => {
+      const aligned = unwrap<{ alignment: { segmentId: string; frames: number } }>(
+        await postJson('/vidroom/align', {
+          path: dir,
+          segmentId: alignSegmentId,
+          assetId: alignAssetId,
+          audioHash: alignAudioHash,
+          scriptHash: alignScriptHash,
+          wordWindows: JSON.parse(windowsText) as unknown,
+        }),
+      );
+      return `词窗校完:${aligned.alignment.segmentId} → ${aligned.alignment.frames} 帧`;
+    });
+
+  const makePlan = (target: 'candidates' | 'final'): Promise<void> =>
+    run(`算计划(${target})`, async () => {
+      const planned = unwrap<{ plan: PlanView }>(
+        await getJson(`/vidroom/plan?path=${encodeURIComponent(dir)}&target=${target}`),
+      );
+      setPlan(planned.plan);
+      return planned.plan.summary;
+    });
+
+  const render = (): Promise<void> =>
+    run('渲染', async () => {
+      if (plan === undefined) throw new Error('先算一份计划(计划是渲染的入场券)');
+      const started = unwrap<{ runId: string; mode: string }>(
+        await postJson('/vidroom/render', {
+          path: dir,
+          // 用哪份计划就用哪种跑法:候选计划 → 出候选,合成计划 → 合成(别拿请求数猜)。
+          mode: plan.target === 'final' ? 'compose' : 'generate-missing',
+          planHash: plan.planHash,
+          expectedProjectHash: plan.projectHash,
+        }),
+      );
+      return `开跑 ${started.runId}(${started.mode});下面 runs 每 3 秒自己刷`;
+    });
+
+  return h(
+    'div',
+    { className: 'dvr-form' },
+    h('div', { className: 'dvr-env' }, '工程写入口(本机,不外发)'),
+    field('新工程 id(可选)', newProjectId, setNewProjectId, 'vr-demo'),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h(
+        'button',
+        { className: 'dvr-btn', type: 'button', onClick: () => void create() },
+        '造工程',
+      ),
+    ),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h('label', {}, '参考片(本机绝对路径)'),
+      h('input', {
+        className: 'dvr-input',
+        value: referencePath,
+        placeholder: '/home/dav/refs/爆款.mp4',
+        onChange: (event: { currentTarget: { value: string } }) => setReferencePath(event.currentTarget.value),
+      }),
+      h('input', {
+        className: 'dvr-input',
+        value: referenceUrl,
+        placeholder: '原链接(只当文字存档,不下载)',
+        onChange: (event: { currentTarget: { value: string } }) => setReferenceUrl(event.currentTarget.value),
+      }),
+      h('button', { className: 'dvr-btn', type: 'button', onClick: () => void registerRef() }, '登记参考片'),
+    ),
+    area('改工程(白名单 JSON Patch;文案/提示词/种子/选候选/样式)', patchText, setPatchText),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h(
+        'button',
+        { className: 'dvr-btn', type: 'button', onClick: () => void patch() },
+        '应用改动',
+      ),
+    ),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h('label', {}, '导素材(本机路径 → 工程资产)'),
+      h('input', {
+        className: 'dvr-input',
+        value: importPath,
+        placeholder: '/home/dav/tts/配音.mp3',
+        onChange: (event: { currentTarget: { value: string } }) => setImportPath(event.currentTarget.value),
+      }),
+      h(
+        'select',
+        {
+          className: 'dvr-input',
+          value: importKind,
+          onChange: (event: { currentTarget: { value: string } }) => setImportKind(event.currentTarget.value),
+        },
+        ...['video', 'audio', 'image', 'font'].map((kind) => h('option', { key: kind, value: kind }, kind)),
+      ),
+      h('button', { className: 'dvr-btn', type: 'button', onClick: () => void importAsset() }, '导进来'),
+    ),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h('label', {}, '手工登记候选(用工程里已有的素材)'),
+      h(
+        'select',
+        {
+          className: 'dvr-input',
+          value: shotId,
+          onChange: (event: { currentTarget: { value: string } }) => setShotId(event.currentTarget.value),
+        },
+        h('option', { value: '' }, shots.length === 0 ? '还没有镜头' : '挑镜头…'),
+        ...shots.map((shot) => h('option', { key: shot.id, value: shot.id }, `${shot.id}(${shot.segmentId ?? '没绑文案段'})`)),
+      ),
+      h(
+        'select',
+        {
+          className: 'dvr-input',
+          value: assetId,
+          onChange: (event: { currentTarget: { value: string } }) => setAssetId(event.currentTarget.value),
+        },
+        h('option', { value: '' }, assets.length === 0 ? '还没有素材' : '挑素材…'),
+        ...assets.map((item) => h('option', { key: item.id, value: item.id }, `${item.id}(${item.kind})`)),
+      ),
+      h(
+        'label',
+        { className: 'dvr-check' },
+        h('input', {
+          type: 'checkbox',
+          checked: selectNow,
+          onChange: (event: { currentTarget: { checked: boolean } }) => setSelectNow(event.currentTarget.checked),
+        }),
+        '顺便选定',
+      ),
+      h('button', { className: 'dvr-btn', type: 'button', onClick: () => void addCandidate() }, '登记候选'),
+    ),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h('label', {}, '计划(渲染前必须冻结一份)'),
+      h('button', { className: 'dvr-btn', type: 'button', onClick: () => void makePlan('candidates') }, '算候选计划'),
+      h('button', { className: 'dvr-btn', type: 'button', onClick: () => void makePlan('final') }, '算合成计划'),
+      h(
+        'button',
+        { className: 'dvr-btn', type: 'button', onClick: () => void render() },
+        '按这份计划渲染',
+      ),
+    ),
+    plan === undefined
+      ? null
+      : h(
+          'div',
+          { className: plan.ready ? 'dvr-status dvr-status--ok' : 'dvr-status dvr-status--err' },
+          plan.summary,
+        ),
+    h(
+      'div',
+      { className: 'dvr-field' },
+      h('label', {}, '校词窗(词锚:改过文案/音轨才需要)'),
+      h('input', {
+        className: 'dvr-input',
+        value: alignSegmentId,
+        placeholder: 'segmentId',
+        onChange: (event: { currentTarget: { value: string } }) => setAlignSegmentId(event.currentTarget.value),
+      }),
+      h('input', {
+        className: 'dvr-input',
+        value: alignAssetId,
+        placeholder: 'assetId(音轨)',
+        onChange: (event: { currentTarget: { value: string } }) => setAlignAssetId(event.currentTarget.value),
+      }),
+      h('input', {
+        className: 'dvr-input',
+        value: alignAudioHash,
+        placeholder: 'audioHash(工程里记的)',
+        onChange: (event: { currentTarget: { value: string } }) => setAlignAudioHash(event.currentTarget.value),
+      }),
+      h('input', {
+        className: 'dvr-input',
+        value: alignScriptHash,
+        placeholder: 'scriptHash(工程里记的)',
+        onChange: (event: { currentTarget: { value: string } }) => setAlignScriptHash(event.currentTarget.value),
+      }),
+      area('wordWindows(JSON:[{tokenId,startFrame,endFrame}])', windowsText, setWindowsText),
+      h('button', { className: 'dvr-btn', type: 'button', onClick: () => void align() }, '校词窗'),
+    ),
+    note === '' ? null : h('div', { className: 'dvr-status dvr-status--ok' }, note),
+    problem === '' ? null : h('div', { className: 'dvr-status dvr-status--err' }, problem),
+  );
 }
 
 export function ProjectPanel(): ReactNode {
@@ -205,6 +550,19 @@ export function ProjectPanel(): ReactNode {
       { className: problems.length === 0 ? 'dvr-status dvr-status--ok' : 'dvr-status dvr-status--err', key: 'issues' },
       problems.length === 0 ? '工程自检没有发现断链' : problems.slice(0, 5).join(' / '),
     ),
+  );
+
+  children.push(
+    h(ProjectActions, {
+      key: 'actions',
+      dir,
+      baseHash: view.projectHash,
+      shots: payload?.shots ?? [],
+      assets,
+      reload: async () => {
+        await open(dir);
+      },
+    }),
   );
 
   children.push(

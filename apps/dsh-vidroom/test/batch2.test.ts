@@ -38,22 +38,36 @@ const maybe = ffmpeg ? it : it.skip;
 /**
  * 带冻结计划的渲染:先 plan 拿 planHash,再 startRender。
  * 第 2 批起 render 必填 planHash —— 旧写法(直接 startRender,不带 planHash)会报 PLAN_HASH_MISMATCH。
+ * render 现在非阻塞(校验完就回 runId),所以这里等它跑完才交回 —— 下面的断言看的是终态与产物。
  */
 async function renderWithPlan(
   runtime: ReturnType<typeof createVidroomRuntime>,
   request: { dir: string; mode: 'compose' | 'generate-missing'; expectedProjectHash?: string },
-): ReturnType<typeof startRender> {
+): Promise<{ runId: string; mode: string }> {
   const plan = await planProject(
     request.dir,
     readProject(request.dir),
     request.mode === 'compose' ? 'final' : 'candidates',
   );
-  return startRender(runtime, {
+  const started = await startRender(runtime, {
     dir: request.dir,
     mode: request.mode,
     planHash: plan.planHash,
     ...(request.expectedProjectHash === undefined ? {} : { expectedProjectHash: request.expectedProjectHash }),
   });
+  await waitForRun(request.dir, started.runId);
+  return started;
+}
+
+/** 等一条 run 从 queued/running 走到终态(生成是分钟级的,进度靠轮询)。 */
+async function waitForRun(dir: string, runId: string, timeoutMs = 60_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = jobView(dir, runId).receipt?.state;
+    if (state !== undefined && state !== 'queued' && state !== 'running') return state;
+    if (Date.now() > deadline) throw new Error(`run ${runId} 超时未收尾(当前 ${state ?? '没有回执'})`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 /** 记录这一轮里 fetch 去过的所有地址(验收 5:整条链只许走回环)。 */
@@ -1104,5 +1118,219 @@ describe('第二轮审查边界(旧行为会失败的那些)', () => {
         tools: TOOLS,
       }),
     ).not.toThrow();
+  }, 60_000);
+});
+
+describe('第三轮审查的回归(旧行为必须失败)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-fix3-'));
+
+  maybe('生成期间别人改过工程:候选照登,那份改动不被整份覆盖', async () => {
+    const clip = join(dir, 'clip-merge.mp4');
+    await makeClip(clip, { frames: 24, color: 'blue' });
+    const projectDir = join(dir, 'project-merge');
+    writeFixture(projectDir, (await makeFixture(projectDir, { clips: 1 })).project);
+
+    const comfy = await startFakeComfy({ historyMisses: 0, viewFile: clip });
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 20_000,
+      pollIntervalMs: 10,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+    try {
+      // 先把配方改掉(夹具候选是旧配方):计划里这才真有一条新请求,否则 plan 直接复用,根本没得回写。
+      const seeded = readProject(projectDir);
+      patchProject(projectDir, seeded, {
+        baseHash: projectHash(seeded),
+        patch: [{ op: 'replace', path: 'shots[0].generation.seed', value: 2024 }],
+      });
+      const plan = await planProject(projectDir, readProject(projectDir), 'candidates');
+      expect(plan.newRequests.length).toBe(1);
+      const started = await startRender(runtime, {
+        dir: projectDir,
+        mode: 'generate-missing',
+        planHash: plan.planHash,
+      });
+      // 生成还在跑:这会儿改工程。旧实现拿开工时那份整份回写,这一改就被抹掉了。
+      const mid = readProject(projectDir);
+      patchProject(projectDir, mid, {
+        baseHash: projectHash(mid),
+        patch: [{ op: 'replace', path: 'shots[0].generation.prompt', value: '生成期间改过的提示词' }],
+      });
+
+      const state = await waitForRun(projectDir, started.runId);
+      expect(['succeeded', 'awaiting-selection', 'awaiting-alignment']).toContain(state);
+      const after = readProject(projectDir);
+      // ① 我这一跑新登记的候选在;② 别人改的那句提示词也还在。
+      expect(after.candidates.length).toBeGreaterThan(1);
+      expect(after.shots[0]?.candidateIds.length).toBeGreaterThan(1);
+      expect(after.shots[0]?.generation.prompt).toBe('生成期间改过的提示词');
+    } finally {
+      await comfy.close();
+    }
+  }, 60_000);
+
+  maybe('同配方两条镜头:留着旧配方候选的那条也要登记新候选,不留假 submitted', async () => {
+    const clip = join(dir, 'clip-recipe.mp4');
+    await makeClip(clip, { frames: 24, color: 'green' });
+    const projectDir = join(dir, 'project-recipe');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    // shot-1 改成新配方(旧候选留着),shot-2 用同一个新配方:plan 只发一条请求,两条都该收到产物。
+    const seeded = readProject(projectDir);
+    const shot1 = seeded.shots[0]!;
+    const newGeneration = { ...shot1.generation, prompt: '同配方新提示词', seed: 4242 };
+    patchProject(projectDir, seeded, {
+      baseHash: projectHash(seeded),
+      patch: [
+        { op: 'replace', path: 'shots[0].generation.prompt', value: '同配方新提示词' },
+        { op: 'replace', path: 'shots[0].generation.seed', value: 4242 },
+        {
+          op: 'add',
+          path: 'shots',
+          value: {
+            id: 'shot-2',
+            order: 1,
+            generation: newGeneration,
+            candidateIds: [],
+            edit: { inFrame: 0, outFrame: 24, speed: { num: 1, den: 1 }, audio: 'keep' },
+          },
+        },
+        {
+          op: 'replace',
+          path: 'timeline',
+          value: {
+            fps: { num: 24, den: 1 },
+            width: 320,
+            height: 256,
+            placements: [
+              { shotId: 'shot-1', startFrame: 0, durationFrames: 24 },
+              { shotId: 'shot-2', startFrame: 24, durationFrames: 24 },
+            ],
+            totalFrames: 48,
+          },
+        },
+      ],
+    });
+
+    const comfy = await startFakeComfy({ historyMisses: 0, viewFile: clip });
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 20_000,
+      pollIntervalMs: 10,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+    try {
+      const plan = await planProject(projectDir, readProject(projectDir), 'candidates');
+      expect(plan.newRequests.length).toBe(1); // 同配方只投一条
+      const started = await startRender(runtime, {
+        dir: projectDir,
+        mode: 'generate-missing',
+        planHash: plan.planHash,
+      });
+      await waitForRun(projectDir, started.runId);
+
+      expect(comfy.submissions.length).toBe(1); // 生成一次
+      const after = readProject(projectDir);
+      const shotAfter1 = after.shots.find((shot) => shot.id === 'shot-1');
+      const shotAfter2 = after.shots.find((shot) => shot.id === 'shot-2');
+      // 旧行为:shot-1 因为有旧候选被跳过 → 它永远拿不到新配方的候选,还留着一条假的 submitted 回执。
+      expect(shotAfter1?.candidateIds.length).toBe(2);
+      expect(shotAfter2?.candidateIds.length).toBe(1);
+      const receipt = jobView(projectDir, started.runId).receipt;
+      expect(receipt?.shots.some((shot) => shot.state === 'submitted')).toBe(false);
+      expect(receipt?.shots.filter((shot) => shot.state === 'succeeded')).toHaveLength(2);
+    } finally {
+      await comfy.close();
+    }
+  }, 60_000);
+
+  maybe('渲染是后台的:startRender 回来时还没跑完,靠轮询等到终态', async () => {
+    const clip = join(dir, 'clip-async.mp4');
+    await makeClip(clip, { frames: 24, color: 'yellow' });
+    const projectDir = join(dir, 'project-async');
+    writeFixture(projectDir, (await makeFixture(projectDir, { clips: 1 })).project);
+
+    const comfy = await startFakeComfy({ historyMisses: 0, viewFile: clip });
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 20_000,
+      pollIntervalMs: 10,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+    try {
+      const plan = await planProject(projectDir, readProject(projectDir), 'candidates');
+      const started = await startRender(runtime, {
+        dir: projectDir,
+        mode: 'generate-missing',
+        planHash: plan.planHash,
+      });
+      // 旧行为:startRender 阻塞到跑完,这里已经是 succeeded(异步轮询的承诺是假的)。
+      expect(['queued', 'running']).toContain(jobView(projectDir, started.runId).receipt?.state);
+      expect(await waitForRun(projectDir, started.runId)).not.toBe('running');
+    } finally {
+      await comfy.close();
+    }
+  }, 60_000);
+
+  maybe('面板写入口:POST /vidroom/import 与 /vidroom/candidate 真改工程,GET /vidroom/project 给镜头', async () => {
+    const projectDir = join(dir, 'project-panel-write');
+    writeFixture(projectDir, (await makeFixture(projectDir, { clips: 1 })).project);
+    const extra = join(dir, 'extra-clip.mp4');
+    await makeClip(extra, { frames: 12, color: 'red' });
+
+    const comfy = await startFakeComfy({ historyMisses: 0 });
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 5_000,
+      pollIntervalMs: 10,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+    const web = await startTestWebServer();
+    const disposers = mountVidroomRoutes({ webServer: web.service }, runtime);
+    const post = (path: string, body: unknown) =>
+      fetch(`${web.baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    try {
+      const imported = await post('/vidroom/import', { path: projectDir, sourcePath: extra, kind: 'video' });
+      const importedText = imported.ok ? '' : await imported.text();
+      expect(imported.status, importedText).toBe(200);
+      const payload = (await imported.json()) as { asset: { id: string } };
+      expect(payload.asset.id).toMatch(/^asset-/);
+
+      const project = readProject(projectDir);
+      const shotId = project.shots[0]!.id;
+      const registered = await post('/vidroom/candidate', {
+        path: projectDir,
+        shotId,
+        assetId: payload.asset.id,
+        select: true,
+      });
+      expect(registered.status).toBe(200);
+      const created = (await registered.json()) as { candidate: { id: string } };
+      const after = readProject(projectDir);
+      expect(after.candidates.some((item) => item.id === created.candidate.id)).toBe(true);
+      expect(after.shots.find((shot) => shot.id === shotId)?.selectedCandidateId).toBe(created.candidate.id);
+
+      // 面板要靠这份清单列镜头(挑镜头下拉的数据来源)。
+      const viewed = await fetch(`${web.baseUrl}/vidroom/project?path=${encodeURIComponent(projectDir)}`);
+      const view = (await viewed.json()) as { shots: Array<{ id: string }> };
+      expect(view.shots.map((item) => item.id)).toContain(shotId);
+    } finally {
+      for (const dispose of disposers) dispose();
+      await web.close();
+      await comfy.close();
+    }
   }, 60_000);
 });

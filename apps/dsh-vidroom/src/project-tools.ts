@@ -10,8 +10,8 @@ import type { Config } from './config.js';
 import { VidroomError } from './errors.js';
 import {
   alignSegment,
-  candidateId,
   createProject,
+  importProjectAsset,
   inspectProject,
   jobView,
   listAssets,
@@ -21,14 +21,14 @@ import {
   patchProject,
   planProject,
   projectDirOf,
+  registerCandidate as registerProjectCandidate,
   registerReference,
   startRender,
 } from './project-ops.js';
-import { importAsset, readProject, writeProject } from './project-io.js';
-import { H3_MODEL, projectHash, validateProject, type Budget, type PatchOp, type Project } from './project.js';
+import { readProject } from './project-io.js';
+import { H3_MODEL, projectHash, type Budget, type PatchOp, type Project } from './project.js';
 import { renderVariants, type VariantSpec } from './render.js';
 import type { VidroomRuntime } from './runtime.js';
-import { mediaTools } from './config.js';
 import type { HostContext } from './tools.js';
 
 /** 快操作的超时。 */
@@ -438,10 +438,12 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
   const h3 = tool(
     'vidroom_h3',
     `MiniMax H3 的适配面:action=capabilities 给出可用参数域(帧数/分辨率网格、是否要显存准入)与用的工作流 id/哈希;` +
+      `给 projectPath 时连工程锁里的权重哈希一起核(不给就只能报「本机就绪」里的机器那半);` +
       `action=run 按显式参数跑一次(给出提交时的完整参数快照与实测参数);action=status 按 promptId 查一次真实状态。` +
       `参数不合规会被拒(UNSUPPORTED_PARAMS),不会把请求发出去。`,
     {
       action: { type: 'string', enum: ['capabilities', 'run', 'status'], description: '默认 capabilities。' },
+      projectPath: { type: 'string', description: 'action=capabilities:可选。给了就把这个工程的锁与权重哈希一起核。' },
       prompt: { type: 'string', description: 'action=run:画面描述。' },
       seed: { type: 'number', description: 'action=run:随机种子。' },
       width: { type: 'number', description: 'action=run:宽(要落在 H3 的 32 倍数网格上)。' },
@@ -456,7 +458,11 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
       const action = optStr(args, 'action') ?? 'capabilities';
       const status = await runtime.status(true);
       if (action === 'capabilities') {
+        // 没给工程就没有工程锁可核:`localReady` 只能代表机器那半(连得上 + 准入),这点在摘要里明说。
+        const projectPath = optStr(args, 'projectPath');
+        const locks = projectPath === undefined ? undefined : readProject(projectDirOf(projectPath)).locks;
         const capabilities = h3Capabilities({
+          ...(locks === undefined ? {} : { locks }),
           reachable: status.reachable,
           admissionAllowed: status.admission.allowed,
           admissionReason: status.admission.reason,
@@ -467,7 +473,9 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
           summary: [
             `H3 参数域:帧数 ${capabilities.limits.minFrames}–${capabilities.limits.maxFrames}(${capabilities.limits.frameRule})· 边长倍数 ${capabilities.limits.multipleOf} · fps ${capabilities.limits.fps}`,
             `Reachability:${status.reachable ? '在' : '不在'}(${status.baseUrl});准入:${status.admission.allowed ? '放行' : `拦(${status.admission.reason})`}`,
-            `本机就绪:${capabilities.localReady ? '就绪' : `未就绪(${capabilities.reasons.join('; ')})`};模型 ${H3_MODEL} · 工作流 ${capabilities.workflowId}@${capabilities.workflowHash.slice(0, 12)}`,
+            `本机就绪:${capabilities.localReady ? '就绪' : `未就绪(${capabilities.reasons.join('; ')})`};` +
+              `${projectPath === undefined ? '工程锁未核(没给 projectPath);' : `工程锁已核(${locks?.models.length ?? 0} 个权重);`}` +
+              `模型 ${H3_MODEL} · 工作流 ${capabilities.workflowId}@${capabilities.workflowHash.slice(0, 12)}`,
           ].join('\n'),
         };
       }
@@ -510,24 +518,17 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
     REFERENCE_TIMEOUT_MS,
     async (args) => {
       const dir = projectDirOf(str(args, 'projectPath'));
-      const current = readProject(dir);
       const kind = str(args, 'kind');
       const origin = optStr(args, 'origin') ?? 'local';
-      const asset = await importAsset(dir, {
+      const { asset, projectHashAfter } = await importProjectAsset(config, dir, {
         sourcePath: str(args, 'sourcePath'),
         kind: kind as 'video' | 'audio' | 'image' | 'font',
         origin: origin as 'reference' | 'local' | 'h3',
-        existingIds: current.assets.map((item) => item.id),
-        tools: mediaTools(config),
       });
-      const next = { ...current, assets: [...current.assets, asset] };
-      next.revision = current.revision + 1;
-      next.parentHash = projectHash(current);
-      writeProject(dir, validateProject(next));
       return {
         projectPath: dir,
         asset,
-        projectHash: projectHash(next),
+        projectHash: projectHashAfter,
         summary: `资产 ${asset.id} 已登记(${asset.kind} · ${asset.path} · sha256 ${asset.sha256.slice(0, 12)})`,
       };
     },
@@ -548,45 +549,17 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
     FAST_TIMEOUT_MS,
     async (args) => {
       const dir = projectDirOf(str(args, 'projectPath'));
-      const current = readProject(dir);
-      const shotId = str(args, 'shotId');
-      const assetId = str(args, 'assetId');
-      const shot = current.shots.find((item) => item.id === shotId);
-      if (shot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${shotId}`);
-      const asset = current.assets.find((item) => item.id === assetId);
-      if (asset === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有资产 ${assetId}`);
-      const probe = asset.probe;
-      const id = candidateId(current.candidates.map((item) => item.id));
-      const candidate = {
-        id,
-        shotId,
-        assetId,
-        recipeHash: `${asset.sha256.slice(0, 16)}`,
-        ...(optNum(args, 'seed') === undefined ? {} : { seed: optNum(args, 'seed') as number }),
-        actual: {
-          width: probe?.width ?? 0,
-          height: probe?.height ?? 0,
-          fps: probe?.fps ?? { num: 24, den: 1 },
-          frames: probe?.frames ?? 0,
-          audio: probe?.audio ?? false,
-        },
-        status: 'available' as const,
-      };
-      // 候选 id 列表不在白名单 patch 能碰的范围里,这里直接改并写出(仍走 validateProject)。
-      const next = structuredClone(current) as Project;
-      const targetShot = next.shots.find((item) => item.id === shotId);
-      if (targetShot === undefined) throw new VidroomError('PROJECT_INVALID', `工程里没有镜头 ${shotId}`);
-      targetShot.candidateIds.push(id);
-      next.candidates.push(candidate);
-      if (args.select === true) targetShot.selectedCandidateId = id;
-      next.revision = current.revision + 1;
-      next.parentHash = projectHash(current);
-      writeProject(dir, validateProject(next));
+      const { candidate, projectHashAfter } = registerProjectCandidate(dir, {
+        shotId: str(args, 'shotId'),
+        assetId: str(args, 'assetId'),
+        seed: optNum(args, 'seed'),
+        select: args.select === true,
+      });
       return {
         projectPath: dir,
         candidate,
-        projectHash: projectHash(next),
-        summary: `候选 ${id} 已登记到 ${shotId}${args.select === true ? '(并已选定)' : ''}`,
+        projectHash: projectHashAfter,
+        summary: `候选 ${candidate.id} 已登记到 ${candidate.shotId}${args.select === true ? '(并已选定)' : ''}`,
       };
     },
   );

@@ -11,6 +11,7 @@ import { errorMessage, readJsonBody, sameOrigin, sendJson } from './http.js';
 import {
   alignSegment,
   createProject,
+  importProjectAsset,
   inspectProject,
   jobView,
   listAssets,
@@ -21,6 +22,7 @@ import {
   patchProject,
   planProject,
   projectDirOf,
+  registerCandidate,
   registerReference,
   replayablePath,
   startRender,
@@ -302,6 +304,12 @@ function projectHandlers(
             candidates: listCandidates(project, { limit: 100 }).items,
             missingAssets: missingAssets(project, dir),
             runs: store,
+            shots: project.shots.map((shot) => ({
+              id: shot.id,
+              order: shot.order,
+              ...(shot.segmentId === undefined ? {} : { segmentId: shot.segmentId }),
+              ...(shot.selectedCandidateId === undefined ? {} : { selectedCandidateId: shot.selectedCandidateId }),
+            })),
           });
         });
       },
@@ -470,6 +478,57 @@ function projectHandlers(
               limit: url.searchParams.get('limit') === null ? undefined : Number(url.searchParams.get('limit')),
             }),
           });
+        });
+      },
+    ],
+    [
+      `${ROUTE_PREFIX}/import`,
+      (request, response) => {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { ok: false, error: '只支持 POST' });
+          return;
+        }
+        if (!sameOrigin(request)) {
+          sendJson(response, 403, { ok: false, error: '只接受同源请求' });
+          return;
+        }
+        void guarded(response, async () => {
+          const body = (await readJsonBody(request)) as Record<string, unknown>;
+          const dir = projectDirOf(strField(body, 'path'));
+          const kind = strField(body, 'kind');
+          if (kind !== 'video' && kind !== 'audio' && kind !== 'image' && kind !== 'font') {
+            throw new VidroomError('PROJECT_INVALID', 'kind 只能是 video / audio / image / font');
+          }
+          const { asset, projectHashAfter } = await importProjectAsset(config, dir, {
+            sourcePath: strField(body, 'sourcePath'),
+            kind,
+            ...(typeof body.origin === 'string' ? { origin: body.origin as 'reference' | 'local' | 'h3' } : {}),
+          });
+          sendJson(response, 200, { ok: true, asset, projectHash: projectHashAfter });
+        });
+      },
+    ],
+    [
+      `${ROUTE_PREFIX}/candidate`,
+      (request, response) => {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { ok: false, error: '只支持 POST' });
+          return;
+        }
+        if (!sameOrigin(request)) {
+          sendJson(response, 403, { ok: false, error: '只接受同源请求' });
+          return;
+        }
+        void guarded(response, async () => {
+          const body = (await readJsonBody(request)) as Record<string, unknown>;
+          const dir = projectDirOf(strField(body, 'path'));
+          const { candidate, projectHashAfter } = registerCandidate(dir, {
+            shotId: strField(body, 'shotId'),
+            assetId: strField(body, 'assetId'),
+            ...(typeof body.seed === 'number' ? { seed: body.seed } : {}),
+            ...(body.select === true ? { select: true } : {}),
+          });
+          sendJson(response, 200, { ok: true, candidate, projectHash: projectHashAfter });
         });
       },
     ],

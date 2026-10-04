@@ -17,6 +17,11 @@ export const VIDROOM_SKILL = {
 
 ## 工具
 
+**工程面工具默认不注册**(部署的人打开插件配置 \`chatTools\` 才注册,因为参考片/文案/音轨/工程内容不许进云端对话)。
+看不到下面这批 \`vidroom_reference\` / \`vidroom_project\` / \`vidroom_plan\` / \`vidroom_render\` / \`vidroom_job\` /
+\`vidroom_align_words\` / \`vidroom_candidates\` / \`vidroom_assets\` / \`vidroom_variants\` 工具时,
+**不要假装能调** —— 告诉用户这些操作在本地面板的「工程」区里点,别让他等你去调工具。
+
 - \`vidroom_generate\`:一次出片。参数 \`topic\`(提示词,必填)、\`seconds\`(秒,默认 5)、\`megapixels\`(默认 0.4)、\`aspect\`(默认 "16:9")、\`seed\`(可选,复现用)。
 - \`vidroom_workflows\`:\`action: list\` 列内置工作流;\`action: read { slug }\` 读某份 SKILL.md 原文;\`action: run { slug, topic, seconds?, megapixels?, aspect? }\` 按工作流跑。
 - \`vidroom_reference\`:登记本地参考片(只读本机文件,给它 URL 而不给本地文件会被拒)。
@@ -27,9 +32,11 @@ export const VIDROOM_SKILL = {
 - \`vidroom_align_words\`:按词给某段配音校订时序(词窗 → 帧),回来顺便编译字幕/特效。
 - \`vidroom_candidates\` / \`vidroom_assets\`:找已经生成的候选、列工程依赖的素材(有没有缺件)。
 - \`vidroom_variants\`:一次调用批量做变体(\`action=plan\` 先看、\`action=run\` 才跑),一条失败不影响别人。
-- \`vidroom_h3\`:H3 适配面 —— \`capabilities\`(参数域、工作流哈希、本机就绪没)、\`run\`(显式参数跑一次)、\`status\`(按 promptId 查真实状态)。
+- \`vidroom_h3\`:H3 适配面 —— \`capabilities\`(参数域、工作流哈希、本机就绪没;带上 \`projectPath\` 会连工程锁里的权重哈希一起核,不带就只报机器那半)、\`run\`(显式参数跑一次)、\`status\`(按 promptId 查真实状态)。
 
 ## 复刻一条爆款怎么走
+
+面板「工程」区与工具面走的是同一条 runner;工具没注册时,下面每一步都在面板上点。
 
 1. \`vidroom_reference\` 登记本地参考片 → 拿 \`shotCandidates\` 与 \`requiredAnnotations\`。
 2. 人工确认参考分析(景别/节奏/字幕版式/音色描述都是**人工录入**)→ \`vidroom_project action=patch\` 写进 \`analysis\`。
@@ -52,6 +59,9 @@ export const VIDROOM_SKILL = {
 
 ## 和面板的关系
 
+面板的「工程」区就是这批的**本机写入口**:造工程、登记参考片、改工程(白名单 JSON Patch)、导素材、
+手工登记候选、算计划与按计划渲染、校词窗,都在里面点得出来 —— 工程面工具没开时这条链靠面板走完。
+工具面与面板调的是同一套 ops,看到的数字与错误码一致。
 工作流库里有什么、资产有多少、哪一轮在跑,面板上都看得到:列工作流、看 SKILL.md 原文、点运行、
 看资产与队列、直接在页面里回放素材(路由 \`GET /vidroom/media?path=…&asset=runs/<runId>/final.mp4\`)。
 用户在网页上点运行和模型调工具走的是同一条 runner。`,

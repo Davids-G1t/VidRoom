@@ -16,7 +16,7 @@ import { mediaTools } from './config.js';
 import { VidroomError, errorFacts, type VidroomErrorCode } from './errors.js';
 import { sha256File, toolVersion, type MediaTools } from './media.js';
 import { assertPlanHash, buildPlan, readReceipts, requestFor, type NewRequest, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, ensureDir, importAsset, nextId, writeProject } from './project-io.js';
+import { applyPatch, ensureDir, importAsset, nextId, readProject, writeProject } from './project-io.js';
 import { H3_FPS } from './frames.js';
 import { projectHash, type Budget, type Candidate, type PatchOp, type Project } from './project.js';
 import { RunStore, newRunId, type Receipt, type RunMode, type RunShot } from './receipts.js';
@@ -32,7 +32,6 @@ export interface RenderRequest {
   budget?: Partial<Budget>;
   /** 变体运行为 false:新候选只进 run 快照,不回写工程。 */
   writeBack?: boolean;
-  variantId?: string;
   /** 冻结的校准输入:同批多条时由调用方一次性读了传进来,免得同批第一条跑完就把后面的 planHash 改了。 */
   receipts?: Receipt[];
 }
@@ -144,7 +143,7 @@ async function generateShot(
   runId: string,
   store: RunStore,
   onQueued: (promptId: string) => void,
-): Promise<{ localPath: string; filename: string; result: H3RunResult }> {
+): Promise<{ localPath: string; result: H3RunResult }> {
   const h3Request = {
     prompt: request.prompt,
     ...(request.seed === undefined ? {} : { seed: request.seed }),
@@ -187,15 +186,26 @@ async function generateShot(
   } catch {
     localPath = await runtime.client().fetchMedia(media, downloadPath);
   }
-  return { localPath, filename: safeName, result };
+  return { localPath, result };
 }
 
-/** 跑一条 run:`target: candidates` 只出候选,`final` 只合成。 */
-export async function renderProject(
+/** 校验完、回执已落盘的一条 run。`runId` 此刻就能给调用方去轮询。 */
+export interface PreparedRun {
+  runId: string;
+  store: RunStore;
+  plan: Plan;
+  project: Project;
+  mode: RunMode;
+  tools: MediaTools;
+  request: RenderRequest;
+}
+
+/** 开跑前的全部校验 + 回执落盘,一个 GPU 请求都不发。校验不过直接抛,什么都不留下。 */
+export async function prepareRun(
   runtime: VidroomRuntime,
   project: Project,
   request: RenderRequest,
-): Promise<RenderResult> {
+): Promise<PreparedRun> {
   const config = runtime.config();
   const tools = mediaTools(config);
   const store = new RunStore(request.dir);
@@ -243,7 +253,12 @@ export async function renderProject(
   const runId = newRunId();
   store.create({ runId, project, plan, mode, projectHash: before });
   store.log(runId, `计划 ${plan.planHash.slice(0, 12)} · 复用 ${plan.reuseCandidateIds.length} 个候选 · 新请求 ${plan.newRequests.length} 条`);
+  return { runId, store, plan, project, mode, tools, request };
+}
 
+/** 真跑那一步(分钟级)。失败写进回执再抛,状态靠 `jobView` 轮询。 */
+export async function runPrepared(runtime: VidroomRuntime, prepared: PreparedRun): Promise<RenderResult> {
+  const { runId, store, plan, project, mode, tools, request } = prepared;
   try {
     if (mode === 'candidates') {
       return await runCandidates(runtime, project, plan, { runId, store, tools, request });
@@ -259,6 +274,15 @@ export async function renderProject(
     });
     throw error;
   }
+}
+
+/** 跑一条 run:`target: candidates` 只出候选,`final` 只合成。阻塞到跑完。 */
+export async function renderProject(
+  runtime: VidroomRuntime,
+  project: Project,
+  request: RenderRequest,
+): Promise<RenderResult> {
+  return await runPrepared(runtime, await prepareRun(runtime, project, request));
 }
 
 /** 候选阶段:H3 串行生成 → 立即取回登记。 */
@@ -280,16 +304,25 @@ async function runCandidates(
   let receipt = store.update(runId, { state: 'running' });
   const shots: RunShot[] = [...receipt.shots];
   const newCandidateIds: string[] = [];
-  const working = structuredClone(project) as Project;
+  let working = structuredClone(project) as Project;
 
   // 同配方的镜头:plan 只发一条请求(recipeHash 去重),生成一次,这里把同一个 asset 登记给每条镜头。
   const recipeOf = (shot: Project['shots'][number]): string =>
     requestFor(shot, project.locks?.workflow?.sha256).recipeHash;
+  const candidatesById = new Map(working.candidates.map((candidate) => [candidate.id, candidate]));
+  // 「这条配方已经有能用的候选了」——与 plan 里那个 usable 判据同一套(available + recipeHash 相同)。
+  const hasRecipeCandidate = (shot: Project['shots'][number]): boolean =>
+    shot.candidateIds.some((id) => {
+      const candidate = candidatesById.get(id);
+      return candidate !== undefined && candidate.status === 'available' && candidate.recipeHash === recipeOf(shot);
+    });
 
   for (const request of plan.newRequests) {
-    // 本轮请求要交给哪些镜头:还没候选、且配方与这条请求一致的(含发起它的那条)。
+    // 本轮请求要交给哪些镜头:这条配方还没有合格候选、且配方与这条请求一致的(含发起它的那条)。
+    // 只判 candidateIds.length === 0 会漏掉「留着旧候选但提示词已改」的镜头:产物登记给了别人,
+    // 它自己还留着一条假的 `submitted` 回执。
     const targets = working.shots.filter(
-      (shot) => shot.candidateIds.length === 0 && recipeOf(shot) === request.recipeHash,
+      (shot) => recipeOf(shot) === request.recipeHash && !hasRecipeCandidate(shot),
     );
     if (targets.length === 0) targets.push(...working.shots.filter((shot) => shot.id === request.shotId));
     const startedAt = Date.now();
@@ -389,13 +422,18 @@ async function runCandidates(
   // 新候选登记进工程(变体运行不回写,只更新 run 快照)。
   let hashAfter: string | undefined;
   if (newCandidateIds.length > 0) {
-    working.revision += 1;
-    hashAfter = projectHash(working);
     if (ctx.request.writeBack === false) {
+      working.revision += 1;
+      hashAfter = projectHash(working);
       writeFileSync(store.snapshotPath(runId), `${JSON.stringify(working, null, 2)}\n`, 'utf8');
       store.log(runId, `变体运行:新候选留在本 run 快照里,工程(新哈希 ${hashAfter.slice(0, 12)})不回写`);
     } else {
+      // 生成是分钟级的,这期间别人可能已经 patch 过、导过素材、选过候选:
+      // 重读当前工程,只把我们这一跑新加的并进去。拿开工时那份整份覆盖会把这些抹掉。
+      const latest = readProject(ctx.request.dir);
+      working = mergeGenerated(latest, working, newCandidateIds);
       writeProject(ctx.request.dir, working);
+      hashAfter = projectHash(working);
       store.log(runId, `工程已登记 ${newCandidateIds.length} 个新候选,新哈希 ${hashAfter.slice(0, 12)}`);
     }
   }
@@ -580,7 +618,6 @@ export async function renderVariants(
         planHash: variant.planHash ?? '',
         budget,
         writeBack: false,
-        variantId: variant.id,
         receipts: frozenReceipts,
       });
       runs.push({

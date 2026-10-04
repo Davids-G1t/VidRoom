@@ -1,102 +1,66 @@
 # VidRoom
 
-面向普通 Windows 用户的本地 AI 视频个人工坊:装一个 exe,跟 AI 聊天,在自己的 NVIDIA 显卡上出片。云端生成 API 只做可选(BYOK,自带密钥)。
+一个 **DeepSeek Harness(dsh)插件**:把「本地出片 + 工作流库 + 全中文」带进 dsh。
 
-## 生成在 ComfyUI,不是本仓
+一句话主题 → 交给你自己机器上的 ComfyUI(用 MiniMax H3 模型)出一段短视频;另有一个工作流库面板,
+能列出内置工作流、读 SKILL.md 原文、填主题点运行。桌面壳、ComfyUI 的起停、聊天会话全部交给 dsh,这个仓只做插件。
 
-VidRoom **不自己写生成引擎**。真正的视频/图像生成全部跑在 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)(GPL-3.0)里:
-- ComfyUI 作为**独立进程**运行,由本仓的 Node Host 在首次启动时从官方 Release 下载,经它自带的 HTTP/WebSocket API 驱动。
-- ComfyUI **不随本仓的安装包分发**,也不进这个仓库的源码树。
-- 普通用户默认看不到 ComfyUI 的节点图,只看到聊天界面;高级用户可以一键打开 ComfyUI 自己的网页(只监听 `127.0.0.1`,不对局域网开放)。
+插件本体在 [`apps/dsh-vidroom`](apps/dsh-vidroom/),用法、工具、配置、工作流格式都在那份 [README](apps/dsh-vidroom/README.md) 里。
 
-这样,VidRoom 主程序可以保持 Apache-2.0,不受 ComfyUI 的 GPL-3.0 传染 —— **这是常见做法,不是法律意见**,采用的是 [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI)、[Krita AI Diffusion](https://github.com/Acly/krita-ai-diffusion) 等项目的先例。
+## 装
+
+```bash
+git clone https://github.com/Davids-G1t/VidRoom.git
+cd VidRoom
+corepack pnpm install
+corepack pnpm --filter dsh-vidroom build      # 产出 lib/ 与 client/client.js
+dsh plugin --profile desktop add "$PWD/apps/dsh-vidroom"
+```
+
+换成你在用的 profile(`desktop` / `web`)后重启 dsh:那边会多出 VidRoom 面板入口与两个 Agent 工具
+(`vidroom_generate` / `vidroom_workflows`)。`dsh plugin --profile <profile> remove dsh-vidroom` 卸掉。
+
+第一句 `pnpm install` 不能省:目录装法走 pnpm 的 `link:`,它不会替被链过去的包装依赖 ——
+插件目录里没有 `node_modules` 时,dsh 重启后会报「failed to import」而插件静默不工作(实测过)。
+
+## 生成不在本仓
+
+真正的视频生成全部跑在 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)(GPL-3.0)里:它作为独立进程运行,
+插件只通过它自带的 HTTP API 提交工作流、轮询、取回产物。ComfyUI 与模型权重都**不随本仓分发**,
+也不进这个仓的源码树;插件不对局域网开放任何端口,除了你配置的那个 ComfyUI 地址之外不访问任何第三方。
+
+插件因此可以保持 Apache-2.0,不受 ComfyUI 的 GPL-3.0 传染 —— **这是常见做法,不是法律意见**,
+采用的是 [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI)、[Krita AI Diffusion](https://github.com/Acly/krita-ai-diffusion) 等项目的先例。
+MiniMax H3 模型本身的使用限制见 [docs/USE-POLICY.md](docs/USE-POLICY.md)。
 
 ## 许可
 
-主程序 [Apache-2.0](LICENSE)。ComfyUI 及其驱动的模型各自遵循自己的许可,详见运行时的许可提示(如 MiniMax H3 的社区协议)。剪辑用的 ffmpeg 是首次使用时从 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载的 **LGPL** 构建(不带 GPL 的 libx264,H.264 编码用 BSD 许可的 OpenH264),作为独立可执行文件调用,不链接进主程序。**注意**:思科(Cisco)对 OpenH264 的专利授权只覆盖思科自己分发的二进制([openh264.org FAQ](https://www.openh264.org/faq.html)),这份构建是从源码编译的,不带这项专利授权——这不影响它"不是 GPL"的结论,但涉及 H.264 专利的商业使用要自行评估。代码渲染用的 [HyperFrames](https://github.com/heygen-com/hyperframes) 是 Apache-2.0,随安装包分发;它用的浏览器 chrome-headless-shell(Google 用 Chromium 构建的 Chrome for Testing)不随包分发,首次使用时从 Google 下载。来源、许可与核实过程见 [docs/third-party.md](docs/third-party.md)。
-
-## 状态
-
-重启中。详见 [docs/decisions.md](docs/decisions.md)。
+插件 [Apache-2.0](LICENSE)。插件的源码树里**不包含任何第三方二进制**:既没有 ComfyUI,也没有 ffmpeg、
+模型权重或浏览器内核。`docs/third-party.md` 记录的是已经归档的独立 app 当年打包与下载过的东西(见下),留档备查。
 
 ## 开发
 
-pnpm 单仓:`apps/host`(TypeScript Node Host,只听 `127.0.0.1`)+ `apps/web`(React + Vite 聊天页)+ `apps/desktop`(Electron 壳,打 Windows 安装包)。
+pnpm 单仓,目前只有一个包 `apps/dsh-vidroom`(TypeScript,宿主半边 `src/`,网页面板半边 `src/client/`)。
 
 ```bash
-pnpm install
-pnpm build                  # 构建聊天页到 apps/web/dist,并打桌面版主进程与 Host 单文件
-pnpm start                  # 起 Host,控制台打印一次性「启动地址」,用浏览器打开它
-pnpm desktop                # 起桌面版(开发模式)
-pnpm test                   # 三个包的单元测试
-pnpm test:e2e               # Playwright:不给 key 的页面行为(CI 也跑)
-pnpm test:e2e:gpu           # Playwright:真显卡 + 真 DeepSeek key,只在开发机跑
-pnpm test:e2e:desktop       # Playwright 驱动桌面版:假 key + 假 LLM 服务(CI 上驱动静默安装好的 exe)
-pnpm test:e2e:comfyui       # Playwright:「启动 / 打开 ComfyUI」,默认假 ComfyUI;设了 VIDROOM_COMFYUI_DIR 就用真的
-pnpm hyperframes:install    # 装锁定版本的 HyperFrames CLI(代码渲染视频用;npm ci,按锁文件)
-pnpm test:e2e:motion        # Playwright:代码渲染全链路(假 LLM 回放 + 真浏览器下载与渲染),CI 也跑
-pnpm test:e2e:workflow      # Playwright:工作流库(假 LLM + 假 ComfyUI 回放,真 UI 点击默认/自定义工作流)
-pnpm motion:render -- --title VidRoom --seconds 10 --style gradient   # 不经 LLM 直接渲染一条
-pnpm motion:verify -- <视频.mp4> --seconds 10                           # 交付前自检单独跑
-pnpm comfyui:smoke          # 真 ComfyUI 起停冒烟(参数见 apps/host/scripts/comfyui-smoke.ts)
-pnpm dist:win               # 打 Windows 安装包 VidRoom-Setup-<版本>.exe(CI 在 windows-latest 上打)
+corepack pnpm install
+corepack pnpm test          # 所有包的单元测试(vitest)
+corepack pnpm typecheck     # 宿主半边 + 面板半边两套 tsconfig
+corepack pnpm build         # 打 lib/(宿主)与 client/client.js(面板)
 ```
 
-- 聊天 LLM 走云端(BYOK):默认 DeepSeek,可选 Anthropic(模型 `claude-opus-5-5`)。两家走同一套工具。桌面版在设置页选用哪家、给它填 key;命令行起 Host 时 key **只从文件读**:`VIDROOM_LLM_PROVIDER` 选 `deepseek`(默认)或 `anthropic`,key 文件路径分别由 `VIDROOM_DEEPSEEK_KEY_FILE` / `VIDROOM_ANTHROPIC_KEY_FILE` 给出;不设或文件不存在时聊天不可用,页面提示去设置。
-- 鉴权:Host 启动时打印 `http://127.0.0.1:<端口>/launch?token=<一次性 token>`;打开后换成 HttpOnly 的 session cookie,token 立即作废。所有 `/api/*` 都要这个 cookie,否则 401。
-- 显卡探测:agent 工具 `probe_gpu` 跑 `nvidia-smi`,按显存分档 —— 没有 NVIDIA 显卡 `none`;< 15 GiB `unsupported`;15–24 GiB `experimental`(MiniMax H3 可用、默认关);≥ 24 GiB `default`。显存按整 GiB 四舍五入后比较(标称 24GB 的卡实报常略少于 24576 MiB)。
-- 端口默认随机,可用 `VIDROOM_PORT` 固定。
+测试不需要显卡、不需要 ComfyUI、不联网:集成用例自己起一个**假 ComfyUI**(真 HTTP 服务,按真机形状答
+`/system_stats`、`/prompt`、`/history/<id>`、`/view`),插件这一侧(客户端、runtime、路由、工具)全是真的,
+钉住「提交 → 产出」这条链。真机上要验出片,需要一台显存 ≥ 24 GiB 的 NVIDIA 机器加已配好的 ComfyUI 与 H3 权重。
 
-ComfyUI(`apps/host/src/comfyui/`,页面上点「启动 ComfyUI」时才找/下载/起):
-- **Windows**:首次使用时下载官方 NVIDIA 便携包 `ComfyUI_windows_portable_nvidia.7z`(v0.38.0;版本、大小、sha256 写死在 `manifest.ts`,运行时不向远端要清单),断点续传(HTTP Range),sha256 对不上删掉重下,用随包的 7za 解压到 `%LOCALAPPDATA%\VidRoom\runtime\`。换镜像:环境变量 `VIDROOM_COMFYUI_DOWNLOAD_URL` 给完整下载地址,校验照旧按清单。
-- **Linux**:不下载。环境变量 `VIDROOM_COMFYUI_DIR` 指向已装好的 ComfyUI(有 `main.py` 的目录),python 默认用目录下的 `venv/`、`.venv/`,或用 `VIDROOM_COMFYUI_PYTHON` 指定。
-- 其它环境变量:`VIDROOM_COMFYUI_ARGS`(给 ComfyUI 加参数,如 `--cpu`)、`VIDROOM_DATA_DIR`(数据目录)。
-- Host 把 ComfyUI 当子进程起停:`--listen 127.0.0.1`、端口每次取一个空闲的、`--disable-auto-launch`;轮询 `/system_stats` 到就绪;检查 ComfyUI ≥ 0.30.0、PyTorch CUDA ≥ 13.0。「打开 ComfyUI」在系统默认浏览器里开 `http://127.0.0.1:<端口>/`。
-- 停止:ComfyUI 没有关闭服务的 HTTP 接口,它的正常退出路径是 Ctrl+C。Linux 上给进程组发 SIGINT,10 秒不退再 SIGKILL;Windows 上没有信号可发(Node 的 `kill()` 就是强杀),改为关 stdin 让 ComfyUI 进程里的引导代码模拟 Ctrl+C,10 秒不退再 `taskkill /T /F`。Host 这样主动退出、或被 CLI 强杀时,ComfyUI 发现 stdin 断了会走这条路自己退出。Windows 桌面版走的是另一条路:Electron 退出时连带强杀 ComfyUI 所在的 Windows 作业对象,更快、不经过 stdin 检测,同样不留孤儿,但不是「优雅退出」,是直接强杀(细节见 `apps/host/src/comfyui/process.ts` 顶部注释)。
+## 旧 app 去哪了
 
-出片(MiniMax H3,`apps/host/src/h3/`):
-- 页面上点「出片」:第一次先弹许可同意页(中文摘要 + [许可全文](apps/web/public/licenses/MiniMax-H3-LICENSE.txt)),勾选同意才下载;同意记录(许可文件 sha256 + 同意时间)存在数据目录的 `h3-consent.json`。之后补齐四个权重(清单与 HF API 核对的 size/sha256 在 `models.ts`,钉在 HF commit 上),本地已有且 sha256 对得上的跳过。模型目录 `VIDROOM_MODELS_DIR`(默认 `<数据目录>/models`),经 `--extra-model-paths-config` 告诉 ComfyUI;换镜像 `VIDROOM_H3_DOWNLOAD_BASE`。命令行核对/补齐:`pnpm --filter @vidroom/host h3:models [-- --download]`。
-- 在聊天里说想要什么视频,助手调 `generate_video`:自己写 180–260 词英文提示词,时长按 24 fps 吸附到 17k+5 帧;工作流是锁定 commit 的官方模板 `video_minimax_h3_t2v.json` 转成的 API 格式(`workflows/h3-t2v.json`,来源写在文件里);进度从 ComfyUI 的 WebSocket 转到聊天页;成片进作品库(`<数据目录>/library/videos.json` + MP4),MP4 元数据写 `AI-generated with MiniMax H3`。
-- 准入:显存 ≥24 GiB 默认允许;15–24 GiB 要设 `VIDROOM_H3_EXPERIMENTAL=1`;更低或没有 NVIDIA 显卡不允许。
-- Windows 内存护栏:ComfyUI 放进作业对象(Job Object),整组内存超上限只结束 ComfyUI(退出码 87),Host 不受影响;上限默认「物理内存 − 4 GiB」,`VIDROOM_COMFYUI_MEMORY_LIMIT_MB` 可改(0 = 不设)。
-- 许可义务:成片卡片、详情页、「关于」页标「MiniMax H3」,「关于」页附 NOTICE 原文;使用限制原样转达见 [docs/USE-POLICY.md](docs/USE-POLICY.md);滥用举报流程见 [docs/abuse.md](docs/abuse.md)(菜单「举报滥用」打开 issue 模板)。防滥用靠聊天 LLM 按系统提示词判断意图,不做关键词过滤。仓库里不放任何成片或截帧。
-- 测试:`pnpm test:e2e:h3`(开发机:假 ComfyUI 回放全链路,不碰真实权重、不需要真显卡,测试自己起本机假镜像)、`pnpm test:e2e:abuse`(开发机:真 DeepSeek 的滥用测试,要 `VIDROOM_DEEPSEEK_KEY_FILE`)。
-- 已知问题:权重下载走 Node 的 `fetch`,默认不读系统代理环境变量;连不上 Hugging Face 时(常见于国内网络)要设 `NODE_USE_ENV_PROXY=1` 才会走代理,应用目前不会自动提示这一点,用户会看到下载失败但不知道原因——留给后续批次处理(比如下载失败时给出更明确的排障提示)。
+2026-10-04 起本仓的形态从「独立 Windows app(Node Host + React 网页 + Electron 壳)」改成 dsh 插件,
+旧的三个包与它那套 Playwright e2e 已从 main 删掉,留档在 tag **`legacy-app-final`**:
 
-云端出片(BYOK,`apps/host/src/cloud/`):
-- 本机跑不动(显卡档位 `none`/`unsupported`)或用户明说要用云端时,助手调 `cloud_generate_video`(阿里云百炼、模型 `wan2.7-t2v`)或 `cloud_generate_image`(火山方舟、模型 `seedream-5-0-260128`)。
-- 花钱有闸:这两个工具**只算价钱,不发请求**;页面按工具产物渲染估价卡,用户点「确认生成(会计费)」才 POST `/api/cloud/generate`。请求必须带 `confirm: true`,少了它一律 400 —— 模型自己没有花钱的工具。
-- 价目(工具、估价卡、设置页共用一份,`cloud/pricing.ts`):生视频 720p ¥0.60/秒、1080p ¥1.00/秒(阿里云百炼官网华北2·北京价),生图 ¥0.22/张(火山方舟 Ark 价目页口径;另有页面作 ¥0.33,以 Ark 价目页为准)。
-- key:桌面版在设置页填,用 `safeStorage` 加密存 `cloud-video-key.enc` / `cloud-image-key.enc`,经 IPC 交给 Host,不进环境变量和命令行参数;命令行开发可用 `VIDROOM_CLOUD_VIDEO_KEY_FILE` / `VIDROOM_CLOUD_IMAGE_KEY_FILE`,接口地址用 `VIDROOM_CLOUD_VIDEO_BASE_URL` / `VIDROOM_CLOUD_IMAGE_BASE_URL` 换(测试用)。
-- 提示词会发给对应厂商,生成的内容归厂商服务条款管;云端生成的视频与生图进同一个作品库(生图存 `<数据目录>/images/`)。
-- 云端生成**不能存进工作流**:花钱那一步必须用户本人在估价卡上确认,`save_workflow` 的步骤表里没有云端工具。
-- 设置页的「不用本机显卡」开关把本机档位压成 `none`(`/api/status` 的 `tier`),云端没配 key 时首页会提示两件事一起看。
-- 测试:`pnpm test:e2e:cloud` —— 假 LLM,不碰真网络、不花一分钱,只验到「估价卡不出钱 / 确认门槛 / 档位开关」这几层。
-- 已知问题:**真 key 出片这条路没在开发机跑过**(要真 key 与真花钱),厂商接口的实际响应只按 AI SDK 文档写的;第一次用真 key 时注意看错误提示。
+```bash
+git checkout legacy-app-final    # 旧 app 的完整源码与文档都在这里
+```
 
-工作流库(`apps/host/src/workflows/`,格式见 [docs/workflows.md](docs/workflows.md)):
-- 一个工作流就是数据目录里的 `<slug>/SKILL.md`:frontmatter 写 `name/title/description`,正文给人看,```workflow 围栏写窄 steps DSL。内置「默认工作流」在 Host 启动时物化到 `<数据目录>/workflows/topic-to-video/SKILL.md`,已有文件不覆盖。
-- 默认工作流:一句主题 → LLM 写文案和 3 个分镜 → `generate_video` 跑 3 段(每段 `seconds: 3`,即 73 帧)→ `concat_videos` 拼接 → `add_subtitle` 烧字幕。工作流 runner 复用聊天 agent 的 ai-sdk `tool()` 定义做参数校验,避免工具参数两处定义。
-- 聊天里让助手「以后都这么做」时,LLM 可调用 `save_workflow` 把刚才步骤存成 SKILL.md。页面「工作流库」能运行、查看原文、编辑保存;坏 SKILL.md 会被拒绝。没有 API key 时含 `write_script` 的工作流按聊天同一口径提示去设置。
-
-剪辑(`apps/host/src/ffmpeg/`):
-- agent 工具 `list_videos`、`trim_video`、`concat_videos`、`add_subtitle`,只按作品库 id 操作,结果作为新的一条入库(记 `editedFrom`),原片不动;容器元数据(含 `AI-generated with MiniMax H3`)从第一个输入带过来。
-- ffmpeg:Windows / Linux 都在第一次剪辑时按 `manifest.ts` 下载锁定的 LGPL 构建(版本、大小、sha256 写死,断点续传,解压到 `<数据目录>/runtime/`),**不用系统自带的 ffmpeg**;装好后查 `ffmpeg -version` 的 configuration 行,带 `--enable-gpl` 就拒用。换镜像 `VIDROOM_FFMPEG_DOWNLOAD_URL`;命令行预下载 `pnpm ffmpeg:fetch`。
-- 剪切:起点在关键帧上就 `-c copy` 流复制;不在就用 libopenh264 重新编码,剪得准但慢。拼接:各段编码参数一致用 concat demuxer 流复制,不一致用 concat 滤镜统一成第一段的尺寸/帧率后重新编码(没声音的段补静音)。加字幕:`drawtext` 烧进画面,libopenh264 重新编码;字体按平台找带中文字形的系统字体(Windows 微软雅黑/黑体/宋体,Linux Noto CJK/文泉驿),`VIDROOM_SUBTITLE_FONT` 可指定。
-- 测试素材由 ffmpeg 的 `color`/`testsrc`/`sine` 现做(几百 KB),放 `apps/host/.test-tmp/`(`VIDROOM_TEST_TMP` 可改),不用系统临时目录。
-
-代码渲染视频(`apps/host/src/motion/`,不用 AI 模型、不占显卡):
-- agent 工具 `render_motion`:开场动画、标题卡这类文字动效。流程是「分镜 → 构建 → 渲染 → 编码 → 自检 → 入库」:按标题/副标题/时长拆镜头(标题出现 → 停留 → 标题淡出),按风格包写成一份 [HyperFrames](https://github.com/heygen-com/hyperframes)(Apache-2.0)合成(HTML + CSS 关键帧),HyperFrames CLI 用无头浏览器逐帧截图成 PNG,再用上面那份 LGPL ffmpeg(libopenh264)编成 MP4。
-- 两个风格包:`minimal` 简约文字卡片(米白底、深色字、下划线展开、底部进度线)、`gradient` 动态渐变背景(深色底上三团彩色光斑漂移、标题从模糊放大到清晰)。1280×720、30 fps、3–30 秒。
-- 交付前自检:MP4 探测(h264、尺寸、时长与要求差 ≤0.1 秒)、冻帧检测(逐帧 md5,连续 1 秒以上完全相同就判渲染卡住)、联系表(均匀抽 12 帧拼 4×3 一张 PNG,存在作品目录 `<数据目录>/library/<id>.contact.png`)。不通过就不入库,原因转告用户。
-- 浏览器:首次渲染时按 `motion/browser.ts` 的清单下载 Chrome for Testing 的 chrome-headless-shell(版本与 HyperFrames 自己锁的一致,大小与 sha256 写死),解压到 `<数据目录>/runtime/`;换镜像 `VIDROOM_BROWSER_DOWNLOAD_URL`。来源、许可、为什么不复用 Electron 自带的 Chromium,见 [docs/third-party.md](docs/third-party.md)。
-- HyperFrames 的遥测、查新版本、自动升级一律关掉;它写的配置与临时文件都落在数据目录,不进用户家目录和系统临时目录。
-- 作品库里代码渲染的卡片标「代码渲染」,不标 AI 生成。
-
-桌面版(`apps/desktop`):
-- 页面从 `vidroom-app://app/` 加载,开 `sandbox`、`contextIsolation`,关 `nodeIntegration`;每个 IPC 调用先核来源(必须是本应用的顶层页面),不是就拒绝并记日志。
-- Host 是主进程用 `ELECTRON_RUN_AS_NODE=1` fork 出来的子进程(复用 Electron 自带的 Node)。页面的 `/api` 请求由协议处理器带上 session cookie 转发给 Host,页面看不到启动地址和 cookie。
-- 设置页填的 key 用 Electron `safeStorage`(Windows 上走 DPAPI)加密,每家一个文件(`deepseek-key.enc`、`anthropic-key.enc`、云端两把 `cloud-video-key.enc` / `cloud-image-key.enc`),选用哪家记在 `llm-provider.json`;启动时主进程解密当前那家的 key 与云端 key,经 fork 的 IPC 通道交给 Host,不进环境变量和命令行参数。页面只能「给某家设置新 key」「切换用哪家」和「问有没有 key」,拿不到明文也拿不到密文。
-- 安装包带上 HyperFrames CLI 及其 node_modules(`resources/hyperframes`,打包前先 `pnpm hyperframes:install`),Host 以 `ELECTRON_RUN_AS_NODE=1` 的同一个可执行文件去跑它。
-- 关窗时有聊天请求在进行就先问;退出时连带结束 Host(Host 也会在父进程断开时自己退出)。
-- 安装包:未签名 NSIS,`oneClick: false`、`perMachine: false`,静默安装(`/S`)默认装进 `%LOCALAPPDATA%\Programs\VidRoom`,只写 HKCU。
+`docs/decisions.md` 是一直沿用的裁决记录;`docs/USE-POLICY.md`(H3 使用限制)对插件仍然适用;
+`docs/third-party.md` 是归档 app 的第三方组件核查表。

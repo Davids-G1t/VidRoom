@@ -1,0 +1,4 @@
+# dsh-vidroom bundle patch:把插件插进 profile 的层叠配置里。
+- insert:
+    - id: vidroom
+      name: 'dsh-vidroom'

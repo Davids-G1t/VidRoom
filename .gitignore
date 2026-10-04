@@ -1,7 +1,7 @@
 node_modules/
 dist/
-release/
-test-results/
-playwright-report/
+lib/
+apps/dsh-vidroom/client/
 *.tsbuildinfo
+*.tgz
 .test-tmp/

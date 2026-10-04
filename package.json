@@ -9,27 +9,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "start": "pnpm --filter @vidroom/host start",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck",
-    "test:e2e": "pnpm build && playwright test --project=no-key",
-    "test:e2e:gpu": "pnpm build && playwright test --project=gpu",
-    "test:e2e:desktop": "pnpm build && playwright test --project=desktop",
-    "test:e2e:comfyui": "pnpm build && playwright test --project=comfyui",
-    "test:e2e:h3": "pnpm build && playwright test --project=h3",
-    "test:e2e:abuse": "pnpm build && playwright test --project=abuse",
-    "desktop": "pnpm build && pnpm --filter @vidroom/desktop start",
-    "dist:win": "pnpm build && pnpm --filter @vidroom/desktop dist --win",
-    "comfyui:smoke": "pnpm --filter @vidroom/host comfyui:smoke",
-    "ffmpeg:fetch": "pnpm --filter @vidroom/host ffmpeg:fetch",
-    "hyperframes:install": "npm ci --prefix apps/host/hyperframes --ignore-scripts --omit=dev --no-audit --no-fund",
-    "motion:render": "pnpm --filter @vidroom/host motion:render",
-    "motion:verify": "pnpm --filter @vidroom/host motion:verify",
-    "test:e2e:motion": "pnpm build && playwright test --project=motion",
-    "test:e2e:workflow": "pnpm build && playwright test --project=workflow",
-    "test:e2e:cloud": "pnpm build && playwright test --project=cloud"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.63.0"
+    "typecheck": "pnpm -r typecheck"
   }
 }

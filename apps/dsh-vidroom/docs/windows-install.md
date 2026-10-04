@@ -31,7 +31,7 @@ foreach ($c in 'dsh','node','pnpm','git','ffmpeg','7z') {
 }
 ```
 
-**判断标准**:显卡要能看到(NVIDIA,显存 20GB 以上)、有盘剩 ≥60GB、驱动正常。
+**判断标准**:显卡要能看到(NVIDIA,**显存 ≥24GB 才默认放行**;15–24GB 属于要显式开实验档的、不到 15GB 直接不放行)、有盘剩 ≥60GB、驱动正常。
 如果 `nvidia-smi` 没有输出 → 先停下报告,别继续。
 
 ---
@@ -110,7 +110,7 @@ curl.exe -L -o "D:\ff.zip" https://github.com/BtbN/FFmpeg-Builds/releases/downlo
 Get-FileHash "D:\ff.zip" -Algorithm SHA256   # 必须是 83a824f0729a69d143c9865125bb86988a11dd388325f0033711045522068aa0
 ```
 
-解压到 `D:\ffmpeg`(里面是 `bin\ffmpeg.exe` 与 `bin\ffprobe.exe`)。
+- 解压到 `D:\`。⚠️ 压缩包解开后的顶层目录叫 `ffmpeg-n9.0.1-11-ge47273f4d9-win64-lgpl-shared-9.0`(和上一步的 ComfyUI 一个道理),**把这层改名成 `ffmpeg`**,最终是 `D:\ffmpeg\bin\ffmpeg.exe` 与 `D:\ffmpeg\bin\ffprobe.exe`。
 
 图省事也可以 `winget install -e --id Gyan.FFmpeg` —— 那是 GPL 构建、版本不钉,自用无所谓,只是不如上面那版可核对。
 
@@ -146,20 +146,31 @@ dsh plugin --profile desktop add (Resolve-Path .\dsh-vidroom-0.1.0.tgz)
 
 插件**不看** ComfyUI 的模型目录,它只认自己配置里的 `modelsRoot`。**两处必须指向同一堆文件**。
 
-找到 dsh 的配置文件(桌面端数据目录在 `%USERPROFILE%\.dsh` 下,具体文件按 dsh 的界面/文档确认),加上这一段:
+配置写在 **profile 的补丁层**里:
+
+```
+%USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml      # 这个 profile 通常是 desktop
+```
+
+那个文件本来就是一个 YAML 数组(每条 `- id:` / `name:` / `config:`),**在数组里加一条**:
 
 ```yaml
-vidroom:
-  baseUrl: http://127.0.0.1:8188
-  modelsRoot: D:\ComfyUI\ComfyUI\models
-  # 如果 ffmpeg 没进 PATH,再加这两行:
-  # ffmpegPath: D:\ffmpeg\bin\ffmpeg.exe
-  # ffprobePath: D:\ffmpeg\bin\ffprobe.exe
+- id: vidroom
+  name: dsh-vidroom
+  config:
+    baseUrl: http://127.0.0.1:8188
+    modelsRoot: D:\ComfyUI\ComfyUI\models
+    # 如果 ffmpeg 没进 PATH,再加这两行:
+    # ffmpegPath: D:\ffmpeg\bin\ffmpeg.exe
+    # ffprobePath: D:\ffmpeg\bin\ffprobe.exe
 ```
+
+> 别改同目录的 `cordis.yml`(那是个空壳,文件头自己写着「Edit cordis.patch.yml, not this file」);
+> 装插件时 `dsh plugin add` 已经把 `dsh-vidroom` 写进同目录的 `package.json` 了,这一步只是补它的 `config`。
 
 改完**重启 dsh**,面板里应显示连上了 `127.0.0.1:8188`、且本机就绪。
 
-> 两个坑:① `baseUrl` **只接受本机回环地址**,填局域网 IP 会被拒;② 显存 ≥24GB 默认放行,20–24GB 属于要显式开 `allowExperimental` 的实验档。
+> 两个坑:① `baseUrl` **只接受本机回环地址**,填局域网 IP 会被拒;② 显存准入是 **≥24GB 默认放行 / 15–24GB 要显式开 `allowExperimental` / <15GB 不放行** 三档。
 
 ---
 

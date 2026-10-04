@@ -1,6 +1,2 @@
 packages:
   - apps/*
-
-# electron 的 postinstall 要下载 Electron 二进制
-onlyBuiltDependencies:
-  - electron

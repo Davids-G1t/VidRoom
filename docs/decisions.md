@@ -31,3 +31,10 @@ VidRoom 的默认使用方式是用户跟内置 agent(LLM)聊天,由 agent 写�
 
 - Wan 2.2 TI2V-5B,1280×704、121 帧、20 步、开 `--fast-disk`:耗时 704.2 秒,显存峰值 12.85 GiB,内存峰值 14.12 GiB。
 - 内存开销近似随「分辨率 × 帧数」的总像素量线性增长(旧仓拟合:内存 ≈ 1.1 GiB + 0.12 GiB × 像素量(Mpx·帧),仅供参考,不是精确公式)。
+
+## D-006 形态:独立 app → dsh 插件(2026-10-04,Dav 裁)
+
+本仓的形态从「独立 Windows app(Node Host + React 网页 + Electron 壳)」改成 **DeepSeek Harness 的一个插件**
+(`apps/dsh-vidroom`):桌面壳、ComfyUI 起停、聊天会话全部交给宿主,本仓只做「本地 H3 出片 + 工作流库 + 中文」那一小块。
+
+三个 app 包与它那套 Playwright e2e 已从 main 删掉,留档在 tag `legacy-app-final`。裁决背景与风险边界见私有仓记录,不在此处复述。

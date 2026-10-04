@@ -1,5 +1,9 @@
 # 第三方组件:来源与许可
 
+> **这份清单记的是已归档的独立 app**(tag `legacy-app-final`)当年自己下载、打包或调用的东西 —— ffmpeg、HyperFrames、
+> chrome-headless-shell 等都随那个 app 一起归档了。**现在的插件本体不分发任何第三方二进制**:既不带 ComfyUI、
+> 也不带 ffmpeg 与模型权重,只通过 HTTP 调用用户自己机器上的 ComfyUI。下面各节留档备查。
+
 本页只记 VidRoom 自己下载、打包或调用的外部组件。ComfyUI、MiniMax H3、ffmpeg 的说明见 [README](../README.md) 的「许可」一节。
 
 ## HyperFrames(代码渲染视频)

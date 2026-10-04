@@ -114,11 +114,13 @@ export function lockFileOf(dir: string): string {
  *
  * 为什么不是内存锁:`writeProject` 的「读-改-写」跨进程也成立 —— dsh 容器里的面板、机器人进程里的
  * CLI、被面板拉起的渲染回写,是三个不同的进程,内存锁只挡得住其中一个。`open(…, O_EXCL)` 是
- * 文件系统给的原子占位,失败方等一小会儿;持有者崩了(锁文件没人管了)靠年龄判废锁,不会永久卡死。
+ * 文件系统给的原子占位,失败方等一小会儿;持有者崩了(锁文件没人管了)靠「年龄 + pid 已死」判废锁,
+ * 不会永久卡死。
  *
- * 锁文件里的内容就是持有者令牌 —— 释放和「我还持有吗」都靠它认自己:废锁被别人抢走后,
- * 原来的持有者不能再删别人的锁。`run` 拿到一个 `assertOwned`(写进盘之前调一次):
- * 自己那把锁中途被抢走(比如本进程被卡了 30 秒以上)时,宁可回 `PROJECT_BUSY` 也不往下写。
+ * 锁文件里写的是 `<令牌> <pid>`:令牌用来认自己 —— 释放与「我还持有吗」都靠它,废锁被抢走后
+ * 原来的持有者不会再删别人的锁;pid 用来判持有者死活 —— 只要它还活着,哪怕卡了 30 秒也不抢。
+ * `run` 拿到一个 `assertOwned`(写进盘之前调一次):自己那把锁中途被抢走时,宁可回 `PROJECT_BUSY`
+ * 也不往下写 —— 这一步是保底:哪怕锁文件被人手工删了、没了,也不可能两个写者同时落盘。
  */
 export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) => T): T {
   const lock = lockFileOf(dir);
@@ -132,41 +134,130 @@ export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) =
     return run(() => assertOwned(lock, token));
   } finally {
     heldLocks.delete(lock);
-    // 只删自己那把手:锁已经被抢走换主时删了它,就是替新持有者开门(第三个写者就能进来)。
-    if (lockTokenOf(lock) === token) {
-      try {
-        unlinkSync(lock);
-      } catch {
-        // 锁文件已经没了(废锁被抢):不该发生,但别让收尾抛错盖掉真正的结果。
-      }
-    }
+    releaseLock(lock, token);
   }
 }
 
-/** 锁文件里的内容就是持有者令牌。 */
-function lockTokenOf(lock: string): string | undefined {
+/** 锁文件里的内容:`<令牌> <pid>`。 */
+function lockOwnerOf(lock: string): { token: string; pid: number } | undefined {
   try {
-    return readFileSync(lock, 'utf8').trim();
+    const [token, rawPid] = readFileSync(lock, 'utf8').trim().split(/\s+/);
+    if (token === undefined || token === '') return undefined;
+    const pid = Number.parseInt(rawPid ?? '', 10);
+    return { token, pid: Number.isInteger(pid) ? pid : -1 };
   } catch {
     return undefined;
   }
 }
 
-/** 我这把锁还在不在自己手里 —— 不在就不能往下写(回 PROJECT_BUSY,让人重来)。 */
+/**
+ * 那个 pid 还活着吗。只有 `ESRCH` 算死;`EPERM` 是活着但不同用户,一样算活。
+ * pid 读不出来(-1)算「说不清」,不当死处理 —— 宁可知难而退报忙,也不抢一把不知道主人的锁。
+ * 前提:写者都在同一个 PID 命名空间里(本机就是:插件、面板、渲染回写都在同一个容器里)。
+ */
+function pidAlive(pid: number): boolean {
+  if (pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/** 我这把锁还在不在自己手里 —— 不在就不能往下写(回 `PROJECT_BUSY`,让人重来)。 */
 function assertOwned(lock: string, token: string): void {
-  if (lockTokenOf(lock) !== token) {
+  if (lockOwnerOf(lock)?.token !== token) {
     throw new VidroomError(
       'PROJECT_BUSY',
-      `这条工程的写锁已经换手(多半是本进程卡了 ${LOCK_STALE_MS}ms 以上,锁被判废锁抢走),这次不写:${lock}`,
+      `这条工程的写锁已经换手(多半是本进程被卡住、锁被当成废锁清了),这次不写:${lock}`,
     );
   }
 }
 
 /**
- * 占位:失败方等一小会儿重试;只有真废锁(年龄超过 `LOCK_STALE_MS`)才抢。
+ * 放锁:只放自己那把。令牌对不上就什么都不动 —— 那把已经不属于我了,删它就是替新持有者开门。
  *
- * 抢的写法是「删旧的,下一轮重新 O_EXCL 占位」—— 不把「删掉」当成「拿到」:删完到占位之间
- * 还可能有别的写者插进来,那也应该让它先。`for` 跑完还没拿到就抛 `PROJECT_BUSY`,绝不空着手进临界区。
+ * 只放过 `ENOENT`(锁已经被清理过)。其他错误(权限/IO)明着抛:那一刻写其实已经落盘,
+ * 但锁会一直挡着后面的写者直到过期,不能装作没事 —— 报 `IO_ERROR` 让人去看。
+ */
+function releaseLock(lock: string, token: string): void {
+  const owner = lockOwnerOf(lock);
+  if (owner !== undefined && owner.token !== token) return;
+  try {
+    unlinkSync(lock);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new VidroomError(
+      'IO_ERROR',
+      `工程写锁没清掉(${(error as Error).message}),后面的写者会被挡到 ${LOCK_STALE_MS}ms:${lock}`,
+    );
+  }
+}
+
+/**
+ * 这把锁能不能抢?两条都要:①年龄超过 `LOCK_STALE_MS`(短临界区里这就是「持有者卡住了」的信号);
+ * ②写锁那个进程已经没了(`kill(pid, 0)` 说 `ESRCH`)。
+ *
+ * ②是关键:只要持有者还活着,哪怕它卡了 30 秒也不抢 —— 「检查完再删」这类写法真正的坑是
+ * 「检查时说它废了、删的时候那把已经换成了新持有者的活锁」;而一个活着的持有者根本不会被抢,
+ * 那个窗口就无从发生。读不出主人(手工改过、别的工具写的)也不抢:报忙,让人自己看。
+ */
+function stealable(lock: string): boolean {
+  const owner = lockOwnerOf(lock);
+  if (owner === undefined || pidAlive(owner.pid)) return false;
+  try {
+    return Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 抢废锁:先把它整把 `rename` 到一个只我知道的名字下 —— `rename` 是原子的,同一把废锁
+ * 只有一个人能抢到手,不存在两个抢锁者都以为自己拿到了。抢到之后再认一遍内容:万一拿到手的
+ * 是别人刚建的活锁(它的 pid 还活着、令牌也不是我刚才看的那把),就原样放回去,不抢。
+ *
+ * 返回值只表示「这把废锁我清掉了,可以重试占位」,不表示「我拿到了锁」—— 占位永远要重新 `O_EXCL`。
+ */
+function stealStaleLock(lock: string, token: string): boolean {
+  const seen = lockOwnerOf(lock);
+  if (seen === undefined) return false;
+  const claim = `${lock}.stale-${token}`;
+  try {
+    renameSync(lock, claim);
+  } catch {
+    // 别人先抢走,或持有者自己放掉了:下一轮重来。
+    return false;
+  }
+  const grabbed = lockOwnerOf(claim);
+  if (grabbed !== undefined && (grabbed.token !== seen.token || pidAlive(grabbed.pid))) {
+    try {
+      renameSync(claim, lock);
+    } catch {
+      // 放不回去 = 这期间又有写者占了位。它那把锁还在,`assertOwned` 会拦住它写;这把丢掉。
+      try {
+        unlinkSync(claim);
+      } catch {
+        // 已经没了。
+      }
+    }
+    return false;
+  }
+  try {
+    unlinkSync(claim);
+  } catch {
+    // 已经没了。
+  }
+  return true;
+}
+
+/**
+ * 占位:失败方等一小会儿重试;只有「年龄过期 + 持有者已死」的废锁才抢。
+ *
+ * 抢的写法是「清掉旧的,下一轮重新 `O_EXCL` 占位」—— 不把「清掉」当成「拿到」:清完到占位
+ * 之间还可能有别的写者插进来,那也应该让它先。`for` 跑完还没拿到就抛 `PROJECT_BUSY`,
+ * 绝不空着手进临界区。
  */
 function acquireLock(dir: string, lock: string, token: string): void {
   ensureDir(dir);
@@ -174,27 +265,21 @@ function acquireLock(dir: string, lock: string, token: string): void {
     try {
       const fd = openSync(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
       try {
-        writeSync(fd, `${token}\n`);
+        writeSync(fd, `${token} ${process.pid}\n`);
       } finally {
         closeSync(fd);
       }
       return;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(lock);
-          continue;
-        }
-      } catch {
-        // 锁刚好被持有者放掉:下一轮直接创建。
-      }
+      if (stealable(lock) && stealStaleLock(lock, token)) continue;
       sleepMs(LOCK_WAIT_MS);
     }
   }
   throw new VidroomError(
     'PROJECT_BUSY',
-    `工程正被另一个写者占着(${LOCK_TRIES * LOCK_WAIT_MS}ms 内没拿到锁),停一下再试:${dir}`,
+    `工程正被另一个写者占着(${LOCK_TRIES * LOCK_WAIT_MS}ms 内没拿到锁),停一下再试。` +
+      `确认没人在写(比如上一次崩了)就删掉这个锁文件再来:${lock}`,
   );
 }
 

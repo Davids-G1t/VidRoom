@@ -16,7 +16,7 @@ import { mediaTools } from './config.js';
 import { VidroomError, errorFacts, type VidroomErrorCode } from './errors.js';
 import { sha256File, toolVersion, type MediaTools } from './media.js';
 import { assertPlanHash, buildPlan, readReceipts, requestFor, type NewRequest, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, ensureDir, importAsset, nextId, readProject, updateProject, writeProject } from './project-io.js';
+import { applyPatch, ensureDir, importAsset, nextId, readProject, updateProject } from './project-io.js';
 import { H3_FPS } from './frames.js';
 import { projectHash, type Budget, type Candidate, type PatchOp, type Project } from './project.js';
 import { RunStore, newRunId, type Receipt, type RunMode, type RunShot } from './receipts.js';

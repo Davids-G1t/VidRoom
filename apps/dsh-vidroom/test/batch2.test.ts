@@ -1647,10 +1647,25 @@ describe('工程写锁(跨进程互斥)', () => {
     return projectDir;
   }
 
+  /**
+   * 找一个真正没在跑的 pid。废锁要的是「写锁那个进程真没了」—— 不是「随便写个假令牌」:
+   * 只按年龄判废锁的旧写法认不出这个区别,而这正是它会被误抢的地方。
+   */
+  function deadPid(): number {
+    for (let pid = 20_000; pid < 30_000; pid += 1) {
+      try {
+        process.kill(pid, 0);
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+      }
+    }
+    throw new Error('没找到空闲 pid');
+  }
+
   it('锁被别的进程占着(新锁)→ 等到超时抛 PROJECT_BUSY,不静默写', () => {
     const projectDir = seedProject('project-locked');
-    // 冒充另一个活着的写者:锁文件在,而且年龄是新的(没到废锁线,不许抢)。
-    writeFileSync(lockFileOf(projectDir), 'other-process-token\n');
+    // 冒充另一个活着的写者:锁文件在、年龄是新的(没到废锁线,不许抢)。
+    writeFileSync(lockFileOf(projectDir), `other-process-token ${process.pid}\n`);
     const before = readProject(projectDir);
 
     const code = ((): string | null => {
@@ -1671,8 +1686,8 @@ describe('工程写锁(跨进程互斥)', () => {
   it('废锁(持有者崩了)→ 抢过来继续干,办完把锁放掉', () => {
     const projectDir = seedProject('project-stale-lock');
     const before = readProject(projectDir);
-    // 崩掉的进程留下的锁:文件在,但已经很旧了。
-    writeFileSync(lockFileOf(projectDir), 'crashed-process-token\n');
+    // 崩掉的进程留下的锁:文件在、很旧,而且记的那个 pid 确实没了(两条都要)。
+    writeFileSync(lockFileOf(projectDir), `crashed-process-token ${deadPid()}\n`);
     const old = new Date(Date.now() - 120_000);
     utimesSync(lockFileOf(projectDir), old, old);
 
@@ -1685,6 +1700,27 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(existsSync(lockFileOf(projectDir))).toBe(false);
   }, 30_000);
 
+  it('持有者还活着(只是卡了很久)→ 不当废锁抢:报 PROJECT_BUSY,也不删它的锁', () => {
+    const projectDir = seedProject('project-slow-holder');
+    const before = readProject(projectDir);
+    // 锁很旧,但写锁那个 pid 还活着 —— 这正是「活人卡住」:只按年龄判废锁的旧写法会把它抢走。
+    writeFileSync(lockFileOf(projectDir), `slow-holder-token ${process.pid}\n`);
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lockFileOf(projectDir), old, old);
+
+    const code = ((): string | null => {
+      try {
+        updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+    expect(code).toBe('PROJECT_BUSY');
+    expect(readProject(projectDir).revision).toBe(before.revision);
+    expect(existsSync(lockFileOf(projectDir))).toBe(true);
+  }, 30_000);
+
   it('锁在中途被别人换手(本进程卡太久被判废锁)→ 写之前认出来:不落盘,也不删别人的锁', () => {
     const projectDir = seedProject('project-lock-stolen');
     const before = readProject(projectDir);
@@ -1693,7 +1729,7 @@ describe('工程写锁(跨进程互斥)', () => {
       try {
         updateProject(projectDir, (current) => {
           // 冒充另一个进程:趁我还在算,把锁抢走换成它的令牌(旧行为:照写,顺手把它的锁删了)。
-          writeFileSync(lockFileOf(projectDir), 'thief-token\n');
+          writeFileSync(lockFileOf(projectDir), `thief-token ${process.pid}\n`);
           return { ...current, revision: current.revision + 1 };
         });
         return null;
@@ -1704,20 +1740,32 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(code).toBe('PROJECT_BUSY');
     expect(readProject(projectDir).revision).toBe(before.revision);
     // 关键:新持有者的锁不许被我收尾时删掉(删了第三个写者就能进来)。
-    expect(readFileSync(lockFileOf(projectDir), 'utf8').trim()).toBe('thief-token');
+    expect(readFileSync(lockFileOf(projectDir), 'utf8').trim()).toBe(`thief-token ${process.pid}`);
   }, 30_000);
 
   it('真起第二个进程占锁 → PROJECT_BUSY(锁是跨进程的,不是内存里那把)', async () => {
     const projectDir = seedProject('project-real-process');
     const before = readProject(projectDir);
     const lock = lockFileOf(projectDir);
-    // 子进程:占上锁,拿住 1.2 秒再放。
-    const holder = run('node', [
-      '-e',
-      "const fs=require('fs');fs.writeFileSync(process.argv[1],'subprocess-token\\n');setTimeout(()=>{fs.unlinkSync(process.argv[1]);},1200);",
-      lock,
-    ]);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    const ready = `${lock}.ready`;
+    // 子进程自己拿自己的 pid 写锁(锁文件里记的就是持有者),拿住 3 秒再放。
+    const child = [
+      "const fs=require('fs');const [lock,ready]=process.argv.slice(1);",
+      "fs.writeFileSync(lock,'subprocess-'+process.pid+' '+process.pid+'\\n');",
+      "fs.writeFileSync(ready,String(process.pid));",
+      'setTimeout(()=>{try{fs.unlinkSync(lock)}catch{};try{fs.unlinkSync(ready)}catch{}},3000);',
+    ].join('');
+    const holder = run('node', ['-e', child, lock, ready]);
+    // 等它真占上锁(不是睡一个猜出来的毫秒数 —— 那样负载一高就随机红)。
+    for (let i = 0; i < 300 && !existsSync(ready); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(existsSync(ready)).toBe(true);
+    const childPid = readFileSync(ready, 'utf8').trim();
+    expect(childPid).toMatch(/^\d+$/);
+    // 锁里第二个字段得是那个子进程的 pid:这才是「活着的别的进程」,和上面那条
+    // 「活 pid 不许被抢」是同一件事的两面。
+    expect(readFileSync(lock, 'utf8').trim().split(/\s+/)[1]).toBe(childPid);
 
     const code = ((): string | null => {
       try {

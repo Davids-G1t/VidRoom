@@ -10,7 +10,7 @@ export type VidroomErrorCode =
   | 'PROJECT_INVALID'
   | 'PROJECT_NOT_FOUND'
   | 'PROJECT_HASH_MISMATCH'
-  /** 这条工程正被另一个写者占着,或写锁换手太频繁(锁内复核连撞多次):换个时机再写。 */
+  /** 这条工程正被另一个写者占着(锁文件被人占着、写锁中途换手),或锁内复核连撞多次(工程被别人绕过锁改了):换个时机再写。 */
   | 'PROJECT_BUSY'
   | 'PLAN_HASH_MISMATCH'
   | 'WORKFLOW_MISMATCH'

@@ -12,7 +12,7 @@
  * 就 queue,上面那两组「提交数 = 0」的断言就会红。
  */
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1685,87 +1685,75 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(existsSync(lockFileOf(projectDir))).toBe(true);
   }, 30_000);
 
-  it('废锁(持有者崩了)→ 抢过来继续干,办完把锁放掉', () => {
-    const projectDir = seedProject('project-stale-lock');
-    const before = readProject(projectDir);
-    // 崩掉的进程留下的锁:文件在、很旧,而且记的那个 pid 确实没了(两条都要)。
-    writeFileSync(lockFileOf(projectDir), `crashed-process-token ${deadPid()}\n`);
-    const old = new Date(Date.now() - 120_000);
-    utimesSync(lockFileOf(projectDir), old, old);
+  it('旧锁一律不自动抢(崩了的 / 卡住的 / 没内容三种形态)→ PROJECT_BUSY,锁原样留着,报错说得出是谁的', () => {
+    // 回收一把「看着像废锁」的锁只能先看后删 —— 那两步之间锁可能换主,删下去删的就是别人的活锁。
+    // 所以这里三种形态一律动都不动:报错里说清楚是哪把、谁留的、躺了多久,让人确认后手删。
+    const stale = new Date(Date.now() - 120_000);
+    const shapes: Array<{ name: string; content: string }> = [
+      { name: 'project-dead-holder', content: `crashed-process-token ${deadPid()}\n` },
+      // 活人卡住:按年龄算很旧,但写它的那个 pid 还在跑。
+      { name: 'project-slow-holder', content: `slow-holder-token ${process.pid}\n` },
+      // 位占上了、里面什么都没有(别的工具写的,或崩在写入中间)。
+      { name: 'project-headless-lock', content: '' },
+      // 内容写了一半:令牌有、pid 读不出数。
+      { name: 'project-bad-pid-lock', content: 'half-written-token\n' },
+    ];
 
-    const next = updateProject(projectDir, (current) => ({
-      ...current,
-      revision: current.revision + 1,
-      parentHash: projectHash(current),
-    }));
-    expect(next.revision).toBe(before.revision + 1);
-    expect(existsSync(lockFileOf(projectDir))).toBe(false);
-  }, 30_000);
+    for (const shape of shapes) {
+      const projectDir = seedProject(shape.name);
+      const before = readProject(projectDir);
+      writeFileSync(lockFileOf(projectDir), shape.content);
+      utimesSync(lockFileOf(projectDir), stale, stale);
 
-  it('持有者还活着(只是卡了很久)→ 不当废锁抢:报 PROJECT_BUSY,也不删它的锁', () => {
-    const projectDir = seedProject('project-slow-holder');
-    const before = readProject(projectDir);
-    // 锁很旧,但写锁那个 pid 还活着 —— 这正是「活人卡住」:只按年龄判废锁的旧写法会把它抢走。
-    writeFileSync(lockFileOf(projectDir), `slow-holder-token ${process.pid}\n`);
-    const old = new Date(Date.now() - 120_000);
-    utimesSync(lockFileOf(projectDir), old, old);
+      const message = ((): string => {
+        try {
+          updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+          return '写了(不该:旧锁不许被自动抢,更不许悄悄写) ';
+        } catch (error: unknown) {
+          return (error as Error).message;
+        }
+      })();
 
-    const code = ((): string | null => {
-      try {
-        updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
-        return null;
-      } catch (error: unknown) {
-        return errorCode(error);
+      // 一点都没写,而且那把锁原样留着(没被删、也没被改)。
+      expect(readProject(projectDir).revision).toBe(before.revision);
+      expect(readFileSync(lockFileOf(projectDir), 'utf8')).toBe(shape.content);
+      // 报错要把「哪把锁、谁的、躺了多久」说出来,不然人只能去猜该删哪个文件。
+      expect(message).toContain(lockFileOf(projectDir));
+      expect(message).toContain('躺了约 2 分钟');
+      expect(message).toContain('确认没人在写就删掉它再来');
+    }
+  }, 60_000);
+
+  it('锁文件被人删掉或换成别人的 → 落盘前认出来:不写,也不动别人那把', () => {
+    for (const mode of ['deleted', 'replaced'] as const) {
+      const projectDir = seedProject(`project-lock-${mode}`);
+      const before = readProject(projectDir);
+
+      const code = ((): string | null => {
+        try {
+          updateProject(projectDir, (current) => {
+            // 别的东西在这当口把锁删了 / 换成了它的令牌(新写法里没有「按年龄清废锁」这条路了,
+            // 但人要手删、别的工具也可能来碰):这时按路径删它,就是替第三个写者开门。
+            if (mode === 'deleted') unlinkSync(lockFileOf(projectDir));
+            else writeFileSync(lockFileOf(projectDir), `thief-token ${process.pid}\n`);
+            return { ...current, revision: current.revision + 1 };
+          });
+          return null;
+        } catch (error: unknown) {
+          return errorCode(error);
+        }
+      })();
+
+      expect(code).toBe('PROJECT_BUSY');
+      expect(readProject(projectDir).revision).toBe(before.revision);
+      if (mode === 'replaced') {
+        // 收尾时不许把别人那把锁删掉。
+        expect(readFileSync(lockFileOf(projectDir), 'utf8').trim()).toBe(`thief-token ${process.pid}`);
+      } else {
+        // 已经被删了:我不该反过来把它建回去(建回去等于替人占位)。
+        expect(existsSync(lockFileOf(projectDir))).toBe(false);
       }
-    })();
-    expect(code).toBe('PROJECT_BUSY');
-    expect(readProject(projectDir).revision).toBe(before.revision);
-    expect(existsSync(lockFileOf(projectDir))).toBe(true);
-  }, 30_000);
-
-  it('锁在中途被别人换手(本进程卡太久被判废锁)→ 写之前认出来:不落盘,也不删别人的锁', () => {
-    const projectDir = seedProject('project-lock-stolen');
-    const before = readProject(projectDir);
-
-    const code = ((): string | null => {
-      try {
-        updateProject(projectDir, (current) => {
-          // 冒充另一个进程:趁我还在算,把锁抢走换成它的令牌(旧行为:照写,顺手把它的锁删了)。
-          writeFileSync(lockFileOf(projectDir), `thief-token ${process.pid}\n`);
-          return { ...current, revision: current.revision + 1 };
-        });
-        return null;
-      } catch (error: unknown) {
-        return errorCode(error);
-      }
-    })();
-    expect(code).toBe('PROJECT_BUSY');
-    expect(readProject(projectDir).revision).toBe(before.revision);
-    // 关键:新持有者的锁不许被我收尾时删掉(删了第三个写者就能进来)。
-    expect(readFileSync(lockFileOf(projectDir), 'utf8').trim()).toBe(`thief-token ${process.pid}`);
-  }, 30_000);
-
-  it('锁在中途被换成空壳(新持有者刚占位、还没写内容)→ 不写,也不删它那把', () => {
-    const projectDir = seedProject('project-lock-shell');
-    const before = readProject(projectDir);
-
-    const code = ((): string | null => {
-      try {
-        updateProject(projectDir, (current) => {
-          // 别的东西在这当口换了一把锁:里面还是别人的令牌(或根本没内容)。按路径删它,
-          // 就是替第三个写者开门。
-          writeFileSync(lockFileOf(projectDir), '');
-          return { ...current, revision: current.revision + 1 };
-        });
-        return null;
-      } catch (error: unknown) {
-        return errorCode(error);
-      }
-    })();
-    expect(code).toBe('PROJECT_BUSY');
-    expect(readProject(projectDir).revision).toBe(before.revision);
-    // 空壳还在:它可能就是我算的这当口刚建好的那把。
-    expect(existsSync(lockFileOf(projectDir))).toBe(true);
+    }
   }, 30_000);
 
   it('真起第二个进程占锁 → PROJECT_BUSY(锁是跨进程的,不是内存里那把)', async () => {
@@ -1825,15 +1813,24 @@ describe('工程写锁(跨进程互斥)', () => {
       VR_LOCK_RACE_ROUNDS: String(rounds),
       VR_LOCK_RACE_OUT: outs[index] ?? '',
     });
-    await Promise.all(
-      outs.map((_, index) =>
-        run('corepack', ['pnpm', 'exec', 'vitest', 'run', 'test/lock-race-child.test.ts'], {
-          cwd: process.cwd(),
-          env: raceEnv(index),
-          maxBuffer: 8 * 1024 * 1024,
-        }),
-      ),
-    );
+    const race = (index: number) =>
+      run('corepack', ['pnpm', 'exec', 'vitest', 'run', 'test/lock-race-child.test.ts'], {
+        cwd: process.cwd(),
+        env: raceEnv(index),
+        maxBuffer: 8 * 1024 * 1024,
+      });
+
+    // 起跑线:两个子进程各自就位(`.ready`)之后才放行(`.go`)。没这一步,两边可能一先一后
+    // 各跑完 30 轮 —— 那时就算锁是坏的,revision 也是 60,这条用例永远绿。
+    const children = outs.map((_, index) => race(index));
+    const ready = outs.map((file) => `${file}.ready`);
+    const startedBy = Date.now() + 30_000;
+    while (!(existsSync(ready[0] as string) && existsSync(ready[1] as string))) {
+      if (Date.now() > startedBy) throw new Error('两个子进程没在规定时间里就位');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    for (const file of outs) writeFileSync(`${file}.go`, '');
+    await Promise.all(children);
 
     const written = outs.map((file) => Number.parseInt(readFileSync(file, 'utf8').trim(), 10));
     // 两边都真写过(否则这条测不到任何并发),而且一次都没丢:总数 = 最终 revision 的增量 ——
@@ -1841,43 +1838,4 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(written).toEqual([rounds, rounds]);
     expect(readProject(projectDir).revision).toBe(before.revision + rounds * 2);
   }, 180_000);
-
-  it('建了一半留下的空锁(没主人、已过期)→ 当废锁回收:不需要人去手动删', () => {
-    const projectDir = seedProject('project-headless-lock');
-    const before = readProject(projectDir);
-    // 位占上了、里面什么都没有(别的工具写的,或早先版本崩在写入之间):现在自己的占位是
-    // 「先把整份内容写进临时名、再 link 上去」,不会留下这个形态。
-    writeFileSync(lockFileOf(projectDir), '');
-    const old = new Date(Date.now() - 120_000);
-    utimesSync(lockFileOf(projectDir), old, old);
-
-    const next = updateProject(projectDir, (current) => ({
-      ...current,
-      revision: current.revision + 1,
-      parentHash: projectHash(current),
-    }));
-    expect(next.revision).toBe(before.revision + 1);
-    // 自己那把放掉了,抢废锁用的那个临时名字也收拾干净了。
-    expect(existsSync(lockFileOf(projectDir))).toBe(false);
-    expect(readdirSync(projectDir).filter((name) => name.includes('.lock'))).toEqual([]);
-  }, 30_000);
-
-  it('过期的锁里 pid 读不出数(或不是正数)→ 没人能认领它,当废锁回收', () => {
-    const projectDir = seedProject('project-bad-pid-lock');
-    const before = readProject(projectDir);
-    // 这两个形态旧写法不会回收:一处把读不出的 pid 当成「说不清」而永远算活着,
-    // 结果这把锁卡到天荒地老,后面的写者只能一直 PROJECT_BUSY。
-    for (const content of ['half-written-token\n', 'token-without-pid -7\n']) {
-      writeFileSync(lockFileOf(projectDir), content);
-      const old = new Date(Date.now() - 120_000);
-      utimesSync(lockFileOf(projectDir), old, old);
-      const next = updateProject(projectDir, (current) => ({
-        ...current,
-        revision: current.revision + 1,
-        parentHash: projectHash(current),
-      }));
-      expect(next.revision).toBeGreaterThan(before.revision);
-      expect(existsSync(lockFileOf(projectDir))).toBe(false);
-    }
-  }, 30_000);
 });

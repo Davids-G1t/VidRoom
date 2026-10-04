@@ -162,7 +162,6 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
       localPath: { type: 'string', description: '本机参考视频的绝对路径(必需)。' },
       projectPath: { type: 'string', description: '落到哪个工程目录;不给就在 projectsRoot 下新建。' },
       referenceUrl: { type: 'string', description: '来源 URL,只作文字存档(只收本机地址)。' },
-      brief: { type: 'string', description: '这条参考要复刻什么(记进工程说明用)。' },
     },
     ['localPath'],
     REFERENCE_TIMEOUT_MS,
@@ -344,15 +343,15 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
   const render = tool(
     'vidroom_render',
     `跑一条 run。mode=compose 只合成(复用已选定候选,ComfyUI 一次都不请求);mode=generate-missing 只补新候选(H3 串行一条条出)。` +
-      `先 vidroom_plan 拿 planHash,回来时带上。返回值里给 runId,进度用 vidroom_job 查。`,
+      `先 vidroom_plan 拿 planHash,回来时**必填**带上(对不上不开工)。注意:这个调用等到这一跑结束才回,面板上是边跑边刷的。`,
     {
       projectPath: PROJECT_PATH,
       mode: { type: 'string', enum: ['compose', 'generate-missing'] },
       expectedProjectHash: BASE_HASH,
-      planHash: { type: 'string', description: 'vidroom_plan 给的 planHash。' },
+      planHash: { type: 'string', description: 'vidroom_plan 给的 planHash。**必填**:计划变了就不跑。' },
       budget: { type: 'object', description: '本次预算覆盖。' },
     },
-    ['projectPath', 'mode'],
+    ['projectPath', 'mode', 'planHash'],
     GENERATE_TIMEOUT_MS,
     async (args) => {
       const mode = str(args, 'mode');
@@ -365,7 +364,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
         dir,
         mode,
         expectedProjectHash: optStr(args, 'expectedProjectHash'),
-        planHash: optStr(args, 'planHash'),
+        planHash: need(args, 'planHash') as string,
         budget: budgetOf(args, current),
       });
       const view = jobView(dir, started.runId);
@@ -393,13 +392,12 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
   const variants = tool(
     'vidroom_variants',
     `批量出变体(几条独立工程快照,每条自己的回执与成片;一条失败不覆盖别人的成果)。` +
-      `variants 里每条给 {id, patch:[JSON Patch], seedByShot?};action=plan 只算要不要跑、要出多少条;action=run 真跑。`,
+      `variants 里每条给 {id, patch:[JSON Patch], seedByShot?, planHash?};action=plan 只算要不要跑、要出多少条;action=run 真跑(这时每条**必须**带 action=plan 给回来的 planHash)。`,
     {
       projectPath: PROJECT_PATH,
-      variants: { type: 'array', items: { type: 'object' }, description: '变体列表:{id, patch, seedByShot?}' },
+      variants: { type: 'array', items: { type: 'object' }, description: '变体列表:{id, patch, seedByShot?, planHash?}' },
       action: { type: 'string', enum: ['plan', 'run'], description: '默认 plan(先看要不要跑)。' },
       target: { type: 'string', enum: ['candidates', 'final'] },
-      planHash: { type: 'string', description: '只跑这一份计划(目标变体必须哈希一致)。' },
       expectedProjectHash: BASE_HASH,
       budget: { type: 'object', description: '预算覆盖:{maxVariants,maxNewCandidates,maxDiskBytes,maxWallSeconds}。' },
     },
@@ -424,7 +422,6 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
         target: target({ target: optStr(args, 'target') ?? 'candidates' }),
         variants: list,
         action,
-        planHash: optStr(args, 'planHash'),
         expectedProjectHash: optStr(args, 'expectedProjectHash'),
         budget: budgetOf(args, current),
       });

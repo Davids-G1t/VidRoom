@@ -60,10 +60,12 @@
 
 ## patch 的路径写法
 
-两种都认,指同一处:
+两种都认,指同一处(点号分段,数组那级用 `[id]` 或 `[序号]`):
 
 - 带 id 的段式:`shots[shot-1].generation.prompt`、`styles[style-1].color`
-- JSON Pointer 式:`/shots/0/edit/speed`
+- 用下标的段式:`shots[0].edit.speed`
+
+设计页举的 `/shots/0/edit/speed` 这种 JSON Pointer 写法**不认**(会回 `PATCH_REJECTED`),按这里的段式写。
 
 只能改白名单字段(文案、提示词、fps/尺寸、种子、`edit`、`selectedCandidateId`、样式、锚点/字幕/特效、预算等);
 写别的路径会回 `PATCH_REJECTED`,不会静默忽略。改了词/音轨/裁切/语速会让已有词锚作废 —— 这时工程会要求

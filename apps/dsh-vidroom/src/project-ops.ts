@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { buildAlignment, alignmentIssues, compileTimelineEvents, wordsOf } from './align.js';
 import type { Config } from './config.js';
 import { mediaTools } from './config.js';
@@ -115,6 +115,7 @@ export function patchProject(
   project: Project;
   changedPaths: string[];
   invalidatedShotIds: string[];
+  selectionClearedShotIds: string[];
   alignmentRequired: boolean;
   projectHash: string;
 } {
@@ -134,15 +135,26 @@ export function patchProject(
     project: next,
     changedPaths: patched.changedPaths,
     invalidatedShotIds: patched.invalidatedShotIds,
+    selectionClearedShotIds: patched.selectionClearedShotIds,
     alignmentRequired: patched.alignmentRequired,
     projectHash: projectHash(next),
   };
 }
 
+/** 工程 id 当目录名用,只允一段安全字符 —— 不允许 `/`、`..`、空字符串。 */
+const SAFE_PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
 /** 面板「新建工程」:在 projectsRoot 下落一个空工程。 */
 export function createProject(config: Config, projectId?: string): { dir: string; project: Project } {
+  if (projectId !== undefined && !SAFE_PROJECT_ID.test(projectId)) {
+    throw new VidroomError('PROJECT_INVALID', `工程 id 只能是一段字母数字与 ._- :${projectId}`);
+  }
   const id = projectId ?? `project-${newRunId().slice(4)}`;
   const dir = join(config.projectsRoot, id);
+  const root = resolve(config.projectsRoot);
+  if (!resolve(dir).startsWith(`${root}${sep}`)) {
+    throw new VidroomError('PROJECT_INVALID', `工程 id 越出 projectsRoot:${projectId}`);
+  }
   if (existsSync(projectFileOf(dir))) {
     throw new VidroomError('PROJECT_INVALID', `${dir} 已经有工程了`);
   }
@@ -484,8 +496,12 @@ export function alignSegment(
   const kept = project.alignments.filter((item) => item.segmentId !== alignment.segmentId);
   const next: Project = { ...project, alignments: [...kept, alignment] };
   const audio = next.audio ?? { mode: 'local' as const, assetIds: [], alignmentStatus: 'pending' as const };
+  // 静音工程一旦绑上录音就是要用它:模式跟着改成 local。
+  // (不改的话合成会当静音,资产白登记 —— 这条在返回值 summary 里明说,不默默改。)
+  const switched = audio.mode === 'silent';
   next.audio = {
     ...audio,
+    mode: switched ? ('local' as const) : audio.mode,
     assetIds: audio.assetIds.includes(alignment.assetId) ? audio.assetIds : [...audio.assetIds, alignment.assetId],
     alignmentStatus: 'confirmed',
   };
@@ -506,6 +522,7 @@ export function alignSegment(
     alignment,
     summary: [
       `段 ${alignment.segmentId} 对齐已写:${alignment.words.length} 个词`,
+    ...(switched ? ['音轨模式:silent → local(这一段绑了录音,合成会用它)'] : []),
       `编译出字幕 ${compiled.captions.length} 条、效果 ${compiled.effects.length} 个`,
       unresolved.length === 0 ? '锚点都落实了' : `还有 ${unresolved.length} 处没落实:${unresolved.join('; ')}`,
     ].join('\n'),
@@ -554,10 +571,6 @@ export function jobView(dir: string, runId?: string, limit = 10): JobView {
 /** 同一工程同时只跑一条 run(设计页的 ALREADY_RUNNING)。 */
 const IN_FLIGHT = new Set<string>();
 
-export function isRunning(dir: string): boolean {
-  return IN_FLIGHT.has(resolve(dir));
-}
-
 export function markRunning(dir: string): () => void {
   const key = resolve(dir);
   if (IN_FLIGHT.has(key)) {
@@ -574,7 +587,8 @@ export async function startRender(
     dir: string;
     mode: 'compose' | 'generate-missing';
     expectedProjectHash?: string | undefined;
-    planHash?: string | undefined;
+    /** 计划哈希:必填 —— 没冻结的计划不开工。 */
+    planHash: string;
     budget?: Partial<Budget> | undefined;
   },
 ): Promise<{ runId: string; mode: string }> {
@@ -586,7 +600,7 @@ export async function startRender(
       dir: request.dir,
       target: request.mode === 'compose' ? 'final' : 'candidates',
       ...(request.expectedProjectHash === undefined ? {} : { expectedProjectHash: request.expectedProjectHash }),
-      ...(request.planHash === undefined ? {} : { planHash: request.planHash }),
+      planHash: request.planHash,
       ...(request.budget === undefined ? {} : { budget: request.budget }),
     });
     return { runId: result.runId, mode: request.mode };

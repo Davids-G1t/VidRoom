@@ -10,8 +10,8 @@
 export const H3_FPS = 24;
 /** 网格下界。 */
 export const H3_MIN_FRAMES = 5;
-/** 网格上界。官方口径的上界:124–362 帧(约 5–15 秒),更长是「未测试」。
- * 网格与覆盖范围见 ComfyUI-MiniMaxH3-Tools 的 README(社区整理,非官方一手):
+/** 网格上界。覆盖范围 124–362 帧(约 5–15 秒),更长是「未测试」—— 这是**社区整理**的工具文档口径,不是官方一手:
+ * 网格与覆盖范围见 ComfyUI-MiniMaxH3-Tools 的 README(社区整理):
  * https://github.com/Rinne414/ComfyUI-MiniMaxH3-Tools/blob/master/README.md */
 export const H3_MAX_FRAMES = 362;
 

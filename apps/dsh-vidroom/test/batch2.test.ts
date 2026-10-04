@@ -21,6 +21,7 @@ import { createVidroomRuntime } from '../src/runtime.js';
 import { framesForSeconds } from '../src/frames.js';
 import { mountVidroomRoutes } from '../src/routes.js';
 import { probeMedia } from '../src/media.js';
+import { buildComposeCommand } from '../src/compose.js';
 import { readProject, importAsset } from '../src/project-io.js';
 import { planProject, startRender, listCandidates, jobView, alignSegment, registerReference } from '../src/project-ops.js';
 import { projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
@@ -31,6 +32,27 @@ import { TOOLS, hasFfmpeg, makeClip, makeFixture, writeFixture } from './support
 const run = promisify(execFile);
 const ffmpeg = await hasFfmpeg();
 const maybe = ffmpeg ? it : it.skip;
+
+/**
+ * 带冻结计划的渲染:先 plan 拿 planHash,再 startRender。
+ * 第 2 批起 render 必填 planHash —— 旧写法(直接 startRender,不带 planHash)会报 PLAN_HASH_MISMATCH。
+ */
+async function renderWithPlan(
+  runtime: ReturnType<typeof createVidroomRuntime>,
+  request: { dir: string; mode: 'compose' | 'generate-missing'; expectedProjectHash?: string },
+): ReturnType<typeof startRender> {
+  const plan = await planProject(
+    request.dir,
+    readProject(request.dir),
+    request.mode === 'compose' ? 'final' : 'candidates',
+  );
+  return startRender(runtime, {
+    dir: request.dir,
+    mode: request.mode,
+    planHash: plan.planHash,
+    ...(request.expectedProjectHash === undefined ? {} : { expectedProjectHash: request.expectedProjectHash }),
+  });
+}
 
 /** 记录这一轮里 fetch 去过的所有地址(验收 5:整条链只许走回环)。 */
 function recordFetch(): { urls: string[]; restore: () => void } {
@@ -134,7 +156,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       const request = plan.newRequests[0];
       expect(request).toBeDefined();
 
-      const generated = await startRender(runtime, { dir: projectDir, mode: 'generate-missing' });
+      const generated = await renderWithPlan(runtime, { dir: projectDir, mode: 'generate-missing' });
       expect(jobView(projectDir, generated.runId).receipt?.state).toMatch(/awaiting-selection|succeeded/);
       expect(comfy.submissions.length).toBe(beforePlan + 1);
       const candidates = listCandidates(readProject(projectDir), { limit: 50 });
@@ -222,7 +244,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       writeFixture(projectDir, chosen);
 
       const submissionsBeforeCompose = comfy.submissions.length;
-      const first = await startRender(runtime, {
+      const first = await renderWithPlan(runtime, {
         dir: projectDir,
         mode: 'compose',
         expectedProjectHash: projectHash(chosen),
@@ -247,7 +269,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       expect(Math.abs((probed.frames ?? 0) - start)).toBeLessThanOrEqual(1);
 
       // 再合一次:同样的工程再来一条 run,两条都出片(可重跑,不是一次性)。
-      const second = await startRender(runtime, { dir: projectDir, mode: 'compose' });
+      const second = await renderWithPlan(runtime, { dir: projectDir, mode: 'compose' });
       expect(jobView(projectDir, second.runId).receipt?.state).toBe('succeeded');
       expect(second.runId).not.toBe(first.runId);
       expect(comfy.submissions.length).toBe(submissionsBeforeCompose);
@@ -264,7 +286,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       expect(secondReceipt?.checks.planHashOk).toBe(true);
 
       // 断一条:哈希对不上就拒,且提交数不动。
-      const stale = await startRender(runtime, {
+      const stale = await renderWithPlan(runtime, {
         dir: projectDir,
         mode: 'compose',
         expectedProjectHash: 'deadbeef',
@@ -273,10 +295,72 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
         (error: unknown) => error,
       );
       expect(errorCode(stale)).toBe('PROJECT_HASH_MISMATCH');
-      expect(comfy.submissions.length).toBe(submissionsBeforeCompose);    } finally {
+      expect(comfy.submissions.length).toBe(submissionsBeforeCompose);
+    } finally {
       await comfy.close();
     }
   }, 120_000);
+
+  maybe('预算超了就拒:plan 列得出来、render 直接回 BUDGET_EXCEEDED,ComfyUI 提交数仍 = 0(验收 3)', async () => {
+    const projectDir = join(dir, 'project-budget');
+    const fixture = await makeFixture(projectDir, { clips: 0, selected: false });
+    fixture.project.shots.push({
+      id: 'shot-1',
+      order: 0,
+      generation: {
+        model: 'MiniMax-H3',
+        prompt: '参考复刻:超预算那条',
+        seed: 11,
+        requestedSeconds: 5,
+        width: 384,
+        height: 256,
+        fps: { num: 24, den: 1 },
+      },
+      candidateIds: [],
+      edit: { inFrame: 0, outFrame: framesForSeconds(5), speed: { num: 1, den: 1 }, audio: 'keep' },
+    });
+    fixture.project.timeline = {
+      fps: { num: 24, den: 1 },
+      width: 384,
+      height: 256,
+      placements: [{ shotId: 'shot-1', startFrame: 0, durationFrames: framesForSeconds(5) }],
+      totalFrames: framesForSeconds(5),
+    };
+    writeFixture(projectDir, fixture.project);
+
+    const comfy = await startFakeComfy({});
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 20_000,
+      pollIntervalMs: 10,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+
+    try {
+      const budget = { maxNewCandidates: 0 };
+      const planned = await planProject(projectDir, readProject(projectDir), 'candidates', budget);
+      expect(planned.newRequests.length).toBeGreaterThan(0); // 这条确实要新生成
+      expect(planned.ready).toBe(false);
+      expect(planned.blockers.join('; ')).toMatch(/BUDGET_EXCEEDED/);
+      expect(comfy.submissions.length).toBe(0); // plan 阶段一条都不提交
+
+      const rejected = await startRender(runtime, {
+        dir: projectDir,
+        mode: 'generate-missing',
+        planHash: planned.planHash,
+        budget,
+      }).then(
+        () => null,
+        (error: unknown) => errorCode(error),
+      );
+      expect(rejected).toBe('BUDGET_EXCEEDED');
+      expect(comfy.submissions.length).toBe(0); // 被拒之后也没提交
+    } finally {
+      await comfy.close();
+    }
+  }, 60_000);
 
   maybe('三变体:一次调用三条独立快照/回执/MP4;仅改样式新增 H3 请求 = 0;一条失败不挡另两条', async () => {
     const clip = join(dir, 'voice.mp4');
@@ -298,16 +382,38 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
 
     try {
       const submissionsBefore = comfy.submissions.length;
+      const specs = [
+        { id: 'v1', patch: [{ op: 'replace', path: 'styles[style-1].color', value: 'yellow' }] },
+        { id: 'v2', patch: [{ op: 'replace', path: 'styles[style-1].size', value: 40 }] },
+        // 这一条故意把 path 写歪:它该失败,但不许拖累上面两条。
+        { id: 'v3', patch: [{ op: 'replace', path: 'shots[没有这个镜头].order', value: 9 }] },
+      ];
+
+      // 不带 planHash 就跑:直接拒(run 时每条变体必须有冻结的计划)。旧写法在这儿会静默跑过去。
+      const noPlan = await renderVariants(runtime, fixture.project, {
+        dir: projectDir,
+        target: 'final',
+        action: 'run',
+        variants: [specs[0]],
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(errorCode(noPlan)).toBe('PLAN_HASH_MISMATCH');
+
+      // 先 plan 拿每条变体的 planHash,再带上去跑。
+      const planned = await renderVariants(runtime, fixture.project, {
+        dir: projectDir,
+        target: 'final',
+        action: 'plan',
+        variants: specs,
+      });
+      const hashOf = new Map((planned.plans ?? []).map((item) => [item.variantId, item.planHash]));
       const batch = await renderVariants(runtime, fixture.project, {
         dir: projectDir,
         target: 'final',
         action: 'run',
-        variants: [
-          { id: 'v1', patch: [{ op: 'replace', path: 'styles[style-1].color', value: 'yellow' }] },
-          { id: 'v2', patch: [{ op: 'replace', path: 'styles[style-1].size', value: 40 }] },
-          // 这一条故意把 path 写歪:它该失败,但不许拖累上面两条。
-          { id: 'v3', patch: [{ op: 'replace', path: 'shots[没有这个镜头].order', value: 9 }] },
-        ],
+        variants: specs.map((spec) => ({ ...spec, planHash: hashOf.get(spec.id) ?? 'missing' })),
       });
 
       expect(batch.failures).toBe(1);
@@ -392,7 +498,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
 
     try {
       const submissionsBefore = comfy.submissions.length;
-      const result = await startRender(runtime, { dir: projectDir, mode: 'generate-missing' });
+      const result = await renderWithPlan(runtime, { dir: projectDir, mode: 'generate-missing' });
       // 一个配方只投一次,不是每条镜头各投一次。
       expect(comfy.submissions.length - submissionsBefore).toBe(1);
 
@@ -617,5 +723,111 @@ describe('面板回放(三页签里的资产/队列看的那条路)', () => {
       await web.close();
       await comfy.close();
     }
+  }, 60_000);
+});
+
+describe('本地音轨(audio.mode)', () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-audio-'));
+  });
+
+  maybe('纯音频能导入,audio.mode=local 时独立录音真的合进对应段', async () => {
+    const projectDir = join(dir, 'project-audio');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    const project = fixture.project;
+
+    // 纯音频(没有画面):旧实现会在这儿被「没有视频轨」拒掉。
+    const wav = join(dir, 'vo.wav');
+    await run('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le', wav]);
+    const audioAsset = await importAsset(projectDir, {
+      sourcePath: wav,
+      kind: 'audio',
+      origin: 'local',
+      existingIds: project.assets.map((item) => item.id),
+      tools: TOOLS,
+    });
+    expect(audioAsset.probe?.audio).toBe(true);
+    expect(audioAsset.probe?.frames).toBe(0);
+
+    // 声纹(独立录音)进工程,再用对齐把资产绑到段。
+    project.assets.push(audioAsset);
+    const text = '开场一句话。';
+    const tokens = [
+      { id: 'tk-1', segmentId: 'seg-1', speech: '开场', display: '开场', charRange: [0, 2] as [number, number] },
+      { id: 'tk-2', segmentId: 'seg-1', speech: '一句话', display: '一句话', charRange: [2, 5] as [number, number] },
+    ];
+    const voiced: Project = {
+      ...project,
+      script: {
+        language: 'zh',
+        segments: [{ id: 'seg-1', role: 'hook', text, tokenIds: tokens.map((token) => token.id) }],
+        tokens,
+      },
+      alignments: [],
+      shots: project.shots.map((shot) => ({ ...shot, segmentId: 'seg-1' })),
+    };
+    alignSegment(projectDir, voiced, {
+      segmentId: 'seg-1',
+      assetId: audioAsset.id,
+      audioHash: audioAsset.sha256,
+      scriptHash: (await import('../src/project.js')).scriptHash(voiced.script),
+      wordWindows: [
+        { tokenId: 'tk-1', startFrame: 0, endFrame: 8 },
+        { tokenId: 'tk-2', startFrame: 8, endFrame: 20 },
+      ],
+    });
+    const withLocal = readProject(projectDir);
+    // 对齐就是把独立录音登记进 audio.assetIds 的那一步。
+    expect(withLocal.audio?.mode).toBe('local');
+    expect(withLocal.audio?.assetIds).toEqual([audioAsset.id]);
+
+    // 合成命令里必须出现独立录音这条输入,而且带上补静音(录音短了也不许音画漂)。
+    const outPath = join(projectDir, 'runs', 'run-audio', 'final.mp4');
+    const command = buildComposeCommand(withLocal, { dir: projectDir, runId: 'run-audio', outPath, tools: TOOLS });
+    expect(command.inputs.some((item) => item.endsWith(`${audioAsset.id}.wav`))).toBe(true);
+    expect(command.filterGraph).toContain('apad');
+
+    // 真跑一遍:出得来片,而且成片是「独立录音」的声音而不是静音。
+    const comfy = await startFakeComfy({ historyMisses: 0 });
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 20_000,
+      pollIntervalMs: 10,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+    try {
+      const rendered = await renderWithPlan(runtime, { dir: projectDir, mode: 'compose' });
+      expect(jobView(projectDir, rendered.runId).receipt?.state).toBe('succeeded');
+      const output = join(projectDir, 'runs', rendered.runId, 'final.mp4');
+      expect(existsSync(output)).toBe(true);
+      const probe = await probeMedia(output, TOOLS);
+      expect(probe.audio).toBe(true);
+      expect(probe.frames).toBe(withLocal.timeline?.totalFrames);
+      // 全程没有提交 H3:这一段音轨是本地录音,不该去要模型。
+      expect(comfy.submissions.length).toBe(0);
+    } finally {
+      await comfy.close();
+    }
+  }, 60_000);
+
+  maybe('audio.mode=silent 时候选自带的音轨也不许用', async () => {
+    const projectDir = join(dir, 'project-silent');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    // 夹具第一条片子带声音(tone),但工程写 silent → 合成里只能是 anullsrc。
+    fixture.project.audio = { mode: 'silent', assetIds: [], alignmentStatus: 'pending' };
+    writeFixture(projectDir, fixture.project);
+    const project = readProject(projectDir);
+    const command = buildComposeCommand(project, {
+      dir: projectDir,
+      runId: 'run-silent',
+      outPath: join(projectDir, 'runs', 'run-silent', 'final.mp4'),
+      tools: TOOLS,
+    });
+    expect(command.argv.join(' ')).toContain('anullsrc');
+    expect(command.inputs).toHaveLength(1);
   }, 60_000);
 });

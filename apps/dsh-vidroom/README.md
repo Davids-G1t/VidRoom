@@ -40,7 +40,7 @@ dsh plugin --profile <profile> remove dsh-vidroom
 | `vidroom_generate` | 一句话主题直接出片,等到产物落地才返回 | `prompt`(或 `topic`)、`seconds`、`megapixels`、`aspect`、`seed` |
 | `vidroom_workflows` | 工作流库:`list` 列、`read` 读 SKILL.md 原文、`run` 按工作流跑 | `action`、`slug`、`topic` |
 | `vidroom_h3` | H3 适配面:`capabilities` 给参数域/工作流哈希/本机就绪、`run` 按显式参数跑一次、`status` 按 promptId 查真实状态 | `action`、`prompt`、`width`、`height`、`frames`、`fps`、`seed`、`promptId` |
-| `vidroom_reference` | 登记本地参考片并抽切镜候选(只读本机文件) | `localPath`、`projectPath`、`referenceUrl`、`brief` |
+| `vidroom_reference` | 登记本地参考片并抽切镜候选(只读本机文件) | `localPath`、`projectPath`、`referenceUrl` |
 | `vidroom_project` | 看/改工程:`inspect`、`patch`(白名单 JSON Patch)、`create` | `projectPath`、`action`、`baseHash`、`patch` |
 | `vidroom_plan` | 只算不做:施工图、复用与新生成条数、估算、预算与缺项 | `projectPath`、`target`、`budget` |
 | `vidroom_render` | 按冻结的计划真跑:`generate-missing` 出候选、`compose` 合成 | `projectPath`、`mode`、`planHash`、`expectedProjectHash` |
@@ -48,7 +48,7 @@ dsh plugin --profile <profile> remove dsh-vidroom
 | `vidroom_candidates` / `vidroom_assets` | 列候选 / 列依赖素材与缺件 | `projectPath`、`shotId`、`cursor`、`limit` |
 | `vidroom_align_words` | 人工校订一段配音的词时序,并编译字幕/特效 | `segmentId`、`assetId`、`audioHash`、`scriptHash`、`wordWindows` |
 | `vidroom_variants` | 一次调用批量做变体(先 `plan` 再 `run`) | `variants`、`action`、`target`、`budget`、`planHash` |
-| `vidroom_import_asset` / `vidroom_candidate_add` | 把本机文件登记成工程资产 / 手工登记一条已有候选 | `projectPath`、`path`、`shotId`、`assetId` |
+| `vidroom_import_asset` / `vidroom_candidate_add` | 把本机文件登记成工程资产 / 手工登记一条已有候选 | `projectPath`、`sourcePath`、`shotId`、`assetId` |
 
 两个工具都**只回路径与元数据,不回灌二进制**;产物地址是 ComfyUI 的 `/view` 播放链接,
 面板靠它放播放器,agent 靠它给用户看。

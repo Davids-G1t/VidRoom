@@ -182,7 +182,9 @@ export interface Candidate {
   shotId: string;
   assetId: string;
   recipeHash: string;
+  /** 实际跑出来的 seed(随机也是确定的那个)与 ComfyUI 的 prompt_id:重放要用。 */
   seed?: number;
+  promptId?: string;
   actual: { width: number; height: number; fps: Fps; frames: number; audio: boolean };
   status: 'available' | 'missing' | 'rejected';
 }
@@ -199,6 +201,8 @@ export interface Alignment {
   assetId: string;
   audioHash: string;
   scriptHash: string;
+  /** 校订时那个镜头的裁切/变速指纹:改了裁切或语速,词窗就作废。 */
+  editHash: string;
   fps: Fps;
   method: 'manual';
   status: 'confirmed';
@@ -586,7 +590,7 @@ export function validateProject(value: unknown): Project {
   const candidates = asArray(project.candidates, 'candidates').map((item, index) => {
     const where = `candidates[${index}]`;
     const record = asRecord(item, where);
-    noUnknownKeys(record, ['id', 'shotId', 'assetId', 'recipeHash', 'seed', 'actual', 'status'], where);
+    noUnknownKeys(record, ['id', 'shotId', 'assetId', 'recipeHash', 'seed', 'promptId', 'actual', 'status'], where);
     const assetId = asString(record.assetId, `${where}.assetId`);
     if (!assetIds.has(assetId)) fail(`${where}.assetId`, `没有这个资产:${assetId}`);
     const actual = asRecord(record.actual, `${where}.actual`);
@@ -597,6 +601,7 @@ export function validateProject(value: unknown): Project {
       assetId,
       recipeHash: asString(record.recipeHash, `${where}.recipeHash`),
       ...(record.seed === undefined ? {} : { seed: asInt(record.seed, `${where}.seed`) }),
+      ...(record.promptId === undefined ? {} : { promptId: asString(record.promptId, `${where}.promptId`) }),
       actual: {
         width: asInt(actual.width, `${where}.actual.width`),
         height: asInt(actual.height, `${where}.actual.height`),
@@ -963,7 +968,7 @@ function validateAlignment(
 ): Alignment {
   const where = `alignments[${index}]`;
   const record = asRecord(value, where);
-  noUnknownKeys(record, ['segmentId', 'assetId', 'audioHash', 'scriptHash', 'fps', 'method', 'status', 'words'], where);
+  noUnknownKeys(record, ['segmentId', 'assetId', 'audioHash', 'scriptHash', 'editHash', 'fps', 'method', 'status', 'words'], where);
   const segmentId = asString(record.segmentId, `${where}.segmentId`);
   if (!segmentIds.has(segmentId)) fail(`${where}.segmentId`, `没有这个段:${segmentId}`);
   const assetId = asString(record.assetId, `${where}.assetId`);
@@ -987,6 +992,7 @@ function validateAlignment(
     assetId,
     audioHash: asSha(record.audioHash, `${where}.audioHash`),
     scriptHash: asSha(record.scriptHash, `${where}.scriptHash`),
+    editHash: asString(record.editHash, `${where}.editHash`),
     fps: asFps(record.fps, `${where}.fps`),
     method: 'manual',
     status: 'confirmed',

@@ -8,7 +8,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { extname, join, relative, resolve, sep } from 'node:path';
+import { extname, join, resolve, sep } from 'node:path';
 import { VidroomError } from './errors.js';
 import { probeMedia, sha256File, type MediaTools, type Probe } from './media.js';
 import {
@@ -110,7 +110,9 @@ export async function importAsset(dir: string, options: ImportOptions): Promise<
   copyFileSync(source, target);
   const sha256 = await sha256File(target);
   const probe: Probe | undefined =
-    options.kind === 'video' || options.kind === 'audio' ? await probeMedia(target, options.tools) : undefined;
+    options.kind === 'video' || options.kind === 'audio'
+      ? await probeMedia(target, options.tools, { requireVideo: options.kind === 'video' })
+      : undefined;
   return {
     id,
     kind: options.kind,
@@ -187,6 +189,8 @@ export interface PatchResult {
   project: Project;
   changedPaths: string[];
   invalidatedShotIds: string[];
+  /** 因为失效被清掉选定的镜头:它们本来选定着旧候选,不能再拿旧片顶。 */
+  selectionClearedShotIds: string[];
   alignmentRequired: boolean;
 }
 
@@ -234,28 +238,38 @@ export function applyPatch(project: Project, patch: PatchOp[], options: { seedBy
 
   const stamped = validateProject(next);
   const invalidatedShotIds = computeInvalidatedShots(project, stamped, changedPaths);
+  // 失效就是失效:连带把选定清掉,否则 plan 会接着复用那份旧片。
+  const selectionClearedShotIds: string[] = [];
+  for (const id of invalidatedShotIds) {
+    const shot = stamped.shots.find((item) => item.id === id);
+    if (shot !== undefined && shot.selectedCandidateId !== undefined) {
+      shot.selectedCandidateId = undefined;
+      selectionClearedShotIds.push(id);
+    }
+  }
   return {
     project: stamped,
     changedPaths,
     invalidatedShotIds,
+    selectionClearedShotIds,
     alignmentRequired: changedPaths.some(
-      (path) => path.startsWith('script') || path.startsWith('audio') || /\.edit(\.|$)/.test(path),
+      (path) => path.startsWith('script') || path.startsWith('audio') || /\/edit(\/|$)/.test(path) || /\.edit(\.|$)/.test(path),
     ),
   };
 }
 
-/** 提示词/seed 变了的镜头:它的旧候选不再对得上,要重新生成。 */
+/** 生成参数变了的镜头:旧候选不再对得上,要重新生成。 */
 function computeInvalidatedShots(before: Project, after: Project, changedPaths: string[]): string[] {
   const invalidated = new Set<string>();
   for (const path of changedPaths) {
-    const match = /^shots\[([^\]]+)\]\.generation\.(prompt|seed)$/.exec(path);
+    const match = /^shots\[([^\]]+)\]\.generation\.(prompt|seed|width|height|frames|fps|model)$/.exec(path);
     if (match?.[1] !== undefined) invalidated.add(match[1]);
   }
   for (const shot of after.shots) {
     const previous = before.shots.find((item) => item.id === shot.id);
     if (previous === undefined) continue;
-    if (previous.generation.prompt !== shot.generation.prompt) invalidated.add(shot.id);
-    if (previous.generation.seed !== shot.generation.seed) invalidated.add(shot.id);
+    // 比整体生成参数,不看改动走的是哪条路径 —— 换整块、先删后加都躲不过。
+    if (canonicalJson(previous.generation) !== canonicalJson(shot.generation)) invalidated.add(shot.id);
   }
   return [...invalidated];
 }
@@ -270,14 +284,4 @@ export function projectSummary(project: Project): string {
     `资产 ${project.assets.length}`,
     `哈希 ${projectHash(project).slice(0, 12)}`,
   ].join(' · ');
-}
-
-/** 相对工程根的路径(面板上显示用)。 */
-export function relativeToProject(dir: string, file: string): string {
-  return relative(dir, file).split(sep).join('/');
-}
-
-/** 一份工程快照(canonical JSON),运行目录里落盘用。 */
-export function snapshotOf(project: Project): string {
-  return canonicalJson(project);
 }

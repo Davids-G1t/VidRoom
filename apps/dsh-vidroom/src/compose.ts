@@ -127,6 +127,8 @@ interface Segment {
   shot: Shot;
   videoPath: string;
   audioPath?: string;
+  /** 音轨来自独立录音(audio.mode=local)而不是候选自带:短了要补静音,保证段长对齐。 */
+  localAudio?: true;
   durationFrames: number;
 }
 
@@ -143,23 +145,37 @@ export function buildComposeCommand(project: Project, options: ComposeOptions): 
   const concatLabels: string[] = [];
 
   let inputIndex = 0;
+  const videoInputs: number[] = [];
   for (const segment of segments) {
     args.push('-i', segment.videoPath);
     inputs.push(segment.videoPath);
+    videoInputs.push(inputIndex);
     inputIndex += 1;
   }
-  let silenceCursor = inputIndex;
+  // 独立录音要自己占一个输入;候选自带的音轨就长在它自己的视频里,复用同一个输入。
+  const audioInputs: number[] = [];
+  for (const [position, segment] of segments.entries()) {
+    if (segment.audioPath === undefined || segment.audioPath === segment.videoPath) {
+      audioInputs.push(videoInputs[position] ?? 0);
+      continue;
+    }
+    args.push('-i', segment.audioPath);
+    inputs.push(segment.audioPath);
+    audioInputs.push(inputIndex);
+    inputIndex += 1;
+  }
+  const silenceStart = inputIndex;
   for (const segment of segments) {
     if (segment.audioPath !== undefined) continue;
     args.push('-f', 'lavfi', '-t', (segment.durationFrames / fps).toFixed(6), '-i', `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo`);
-    silenceCursor += 1;
   }
+  // 静音段从静音输入那一堆里按顺序取,取完就往下一个段。
+  let silenceIndex = silenceStart;
 
-  let silenceIndex = inputIndex;
   for (const [position, segment] of segments.entries()) {
     const speed = segment.shot.edit.speed;
     filters.push(
-      `[${position}:v]trim=start_frame=${segment.shot.edit.inFrame}:end_frame=${segment.shot.edit.outFrame},` +
+      `[${videoInputs[position]}:v]trim=start_frame=${segment.shot.edit.inFrame}:end_frame=${segment.shot.edit.outFrame},` +
         `setpts=(PTS-STARTPTS)*${speed.den}/${speed.num},fps=${timeline.fps.num}/${timeline.fps.den},` +
         `scale=${timeline.width}:${timeline.height}:force_original_aspect_ratio=decrease,` +
         `pad=${timeline.width}:${timeline.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v${position}]`,
@@ -174,19 +190,25 @@ export function buildComposeCommand(project: Project, options: ComposeOptions): 
       // 裁切用 start_sample/end_sample:atrim 没有 start_frame/end_frame,而先把音轨重采样到
       // 48000 Hz 之后,24 fps 下每帧正好 2000 个采样,帧↔采样换算不会漂。
       const tempo = atempoChain(speed).join(',');
+      const crop =
+        `atrim=start_sample=${segment.shot.edit.inFrame * SAMPLES_PER_FRAME}:` +
+        `end_sample=${segment.shot.edit.outFrame * SAMPLES_PER_FRAME}`;
+      // 独立录音可能比这段短(没配到整段),补静音再裁到段长,免得 concat 时音画对不上。
+      const pad =
+        segment.localAudio === true
+          ? `,apad,atrim=duration=${(segment.durationFrames / fps).toFixed(6)}`
+          : '';
       filters.push(
-        `[${position}:a]` +
+        `[${audioInputs[position]}:a]` +
           `aresample=${AUDIO_SAMPLE_RATE},` +
-          `atrim=start_sample=${segment.shot.edit.inFrame * SAMPLES_PER_FRAME}:` +
-          `end_sample=${segment.shot.edit.outFrame * SAMPLES_PER_FRAME},` +
+          `${crop},` +
           `asetpts=PTS-STARTPTS,` +
           (tempo === '' ? '' : `${tempo},`) +
-          `aformat=sample_fmts=fltp:channel_layouts=stereo[a${position}]`,
+          `aformat=sample_fmts=fltp:channel_layouts=stereo${pad}[a${position}]`,
       );
     }
     concatLabels.push(`[v${position}][a${position}]`);
   }
-  void silenceCursor;
   filters.push(`${concatLabels.join('')}concat=n=${segments.length}:v=1:a=1[vcat][acat]`);
 
   const compiled = compileTimelineEvents(project);
@@ -300,15 +322,47 @@ function segmentsOf(project: Project, dir: string, timeline: Timeline): Segment[
       );
     }
     const videoPath = resolveInside(dir, asset.path, `镜头 ${shot.id} 的素材`);
-    const keepAudio = shot.edit.audio === 'keep' && (candidate.actual.audio || asset.probe?.audio === true);
+    // 音轨三种模式:
+    //   silent —— 一律静音(连候选自带的也不要)
+    //   h3     —— 候选自带音轨,且 edit.audio='keep' 时才用
+    //   local  —— 用独立录音,靠对齐(alignments)把资产绑定到段
+    const mode = project.audio?.mode ?? 'h3';
+    const localAudio = mode === 'local' ? localAudioPathOf(project, dir, shot) : undefined;
+    const keepAudio =
+      mode === 'h3' && shot.edit.audio === 'keep' && (candidate.actual.audio || asset.probe?.audio === true);
     segments.push({
       shot,
       videoPath,
-      ...(keepAudio ? { audioPath: videoPath } : {}),
+      ...(localAudio !== undefined
+        ? { audioPath: localAudio, localAudio: true as const }
+        : keepAudio
+          ? { audioPath: videoPath }
+          : {}),
       durationFrames: placement.durationFrames,
     });
   }
   return segments;
+}
+
+/** 本地音轨模式:靠对齐找到这个段自己的录音,再把路径落在工程目录里。 */
+function localAudioPathOf(project: Project, dir: string, shot: Shot): string | undefined {
+  const audio = project.audio;
+  if (audio === undefined || audio.mode !== 'local' || audio.assetIds.length === 0) return undefined;
+  const segmentId = shot.segmentId;
+  const alignment = project.alignments.find(
+    (item) => item.segmentId === segmentId && audio.assetIds.includes(item.assetId),
+  );
+  if (alignment === undefined) {
+    throw new VidroomError(
+      'ALIGNMENT_REQUIRED',
+      `镜头 ${shot.id} 在本地音轨模式,但没有找到这个段的录音对齐(段 ${segmentId ?? '未标'});先 vidroom_align_words 再把音轨合进来`,
+    );
+  }
+  const asset = project.assets.find((item) => item.id === alignment.assetId);
+  if (asset === undefined) {
+    throw new VidroomError('PROJECT_INVALID', `对齐引用的资产 ${alignment.assetId} 不在工程里`);
+  }
+  return resolveInside(dir, asset.path, `段 ${segmentId ?? shot.id} 的独立录音`);
 }
 
 function captionFilter(

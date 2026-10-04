@@ -74,8 +74,16 @@ async function exec(tool: string, args: string[]): Promise<{ stdout: string; std
   }
 }
 
-/** 探测一个本地媒体文件。非媒体、读不出来直接抛错。 */
-export async function probeMedia(file: string, tools: MediaTools): Promise<Probe> {
+/** 探测一个本地媒体文件。非媒体、读不出来直接抛错。
+ *
+ * 独立录音(wav/m4a)本来就没有画面,所以 `requireVideo: false` 时纯音频也算探测成功
+ * —— 这时 `width/height/frames` 一律 0(帧数概念对音轨不适用)。默认仍然要求有视频轨。
+ */
+export async function probeMedia(
+  file: string,
+  tools: MediaTools,
+  options: { requireVideo?: boolean } = {},
+): Promise<Probe> {
   const { stdout } = await exec(tools.ffprobePath, [
     '-v',
     'error',
@@ -86,9 +94,24 @@ export async function probeMedia(file: string, tools: MediaTools): Promise<Probe
     file,
   ]);
   const parsed = JSON.parse(stdout) as FfprobeOutput;
+  const hasAudio = (parsed.streams ?? []).some((stream) => stream.codec_type === 'audio');
   const video = parsed.streams?.find((stream) => stream.codec_type === 'video');
   if (video === undefined) {
-    throw new VidroomError('PROJECT_INVALID', `${file} 里没有视频轨(本批的参考片与候选都要有画面)`);
+    if (options.requireVideo !== false) {
+      throw new VidroomError('PROJECT_INVALID', `${file} 里没有视频轨(本批的参考片与候选都要有画面)`);
+    }
+    if (!hasAudio) {
+      throw new VidroomError('PROJECT_INVALID', `${file} 里既没有画面也没有音轨,当不了素材`);
+    }
+    const audioSeconds = Number(parsed.format?.duration ?? '');
+    return {
+      width: 0,
+      height: 0,
+      fps: { num: 24, den: 1 },
+      frames: 0,
+      audio: true,
+      ...(Number.isFinite(audioSeconds) ? { durationSeconds: audioSeconds } : {}),
+    };
   }
   const fps = parseFrameRate(video.r_frame_rate ?? video.avg_frame_rate);
   const duration = Number(video.duration ?? parsed.format?.duration ?? '');
@@ -107,7 +130,7 @@ export async function probeMedia(file: string, tools: MediaTools): Promise<Probe
     height: video.height ?? 0,
     fps,
     frames,
-    audio: (parsed.streams ?? []).some((stream) => stream.codec_type === 'audio'),
+    audio: hasAudio,
     ...(Number.isFinite(duration) ? { durationSeconds: duration } : {}),
   };
 }

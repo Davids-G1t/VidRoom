@@ -13,7 +13,7 @@
 import { mediaKind, type MediaRef } from './comfy.js';
 import { VidroomError } from './errors.js';
 import { H3_FPS, H3_MAX_FRAMES, H3_MIN_FRAMES, isValidFrameCount, secondsForFrames } from './frames.js';
-import { AI_GENERATED_TAG, buildH3Prompt, h3Template, randomSeed } from './h3.js';
+import { AI_GENERATED_TAG, buildH3Prompt, h3Template, randomSeed, type ApiPrompt } from './h3.js';
 import { ASPECT_RATIOS } from './resolution.js';
 import { canonicalJson, sha256Of, type Locks } from './project.js';
 import type { VidroomRuntime } from './runtime.js';
@@ -122,6 +122,8 @@ export interface H3RunResult {
   };
   state: 'succeeded';
   media: Array<MediaRef & { url: string; kind: 'video' | 'image' | 'audio' | 'other' }>;
+  /** 实际提交的那张图(带真 seed):回执要拿它复现,不能靠重算。 */
+  graph: ApiPrompt;
   filename: string;
   elapsedMs: number;
 }
@@ -172,16 +174,14 @@ export async function h3Run(runtime: VidroomRuntime, request: H3Request): Promis
 
   const seed = request.seed ?? randomSeed();
   const fps = request.fps ?? H3_FPS;
-  const promptId = await runtime.client().queue(
-    buildH3Prompt({
-      prompt: request.prompt,
-      frames: request.frames,
-      width: request.width,
-      height: request.height,
-      seed,
-    }),
-    { comment: AI_GENERATED_TAG },
-  );
+  const graph = buildH3Prompt({
+    prompt: request.prompt,
+    frames: request.frames,
+    width: request.width,
+    height: request.height,
+    seed,
+  });
+  const promptId = await runtime.client().queue(graph, { comment: AI_GENERATED_TAG });
   const done = await runtime.client().waitForCompletion(promptId);
   if (done.status === 'error') {
     throw new VidroomError('RENDER_FAILED', `H3 跑失败(prompt_id=${promptId}):${done.error ?? '没给原因'}`);
@@ -212,6 +212,7 @@ export async function h3Run(runtime: VidroomRuntime, request: H3Request): Promis
     },
     state: 'succeeded',
     media,
+    graph,
     filename: first.filename,
     elapsedMs: done.elapsedMs,
   };

@@ -8,8 +8,8 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { H3_WORKFLOW_ID, assertSupported, h3Run, h3WorkflowHash } from './adapter.js';
+import { basename, join, resolve, sep } from 'node:path';
+import { H3_WORKFLOW_ID, assertSupported, h3Run, h3WorkflowHash, type H3RunResult } from './adapter.js';
 import { alignmentIssues } from './align.js';
 import { composeFinal } from './compose.js';
 import { mediaTools } from './config.js';
@@ -27,8 +27,8 @@ export interface RenderRequest {
   target: PlanTarget;
   /** 调用方手里的工程哈希(乐观并发):对不上就拒,不往下走。 */
   expectedProjectHash?: string;
-  /** plan 时拿到的计划哈希;对不上说明计划已经过时。 */
-  planHash?: string;
+  /** 计划哈希:必填。对不上就是拿旧计划跑新工程,直接拒。 */
+  planHash: string;
   budget?: Partial<Budget>;
   /** 变体运行为 false:新候选只进 run 快照,不回写工程。 */
   writeBack?: boolean;
@@ -53,13 +53,19 @@ function restingState(project: Project, mode: RunMode): Receipt['state'] {
   return alignmentIssues(project).length > 0 ? 'awaiting-alignment' : 'succeeded';
 }
 
+/** 落盘用的名字:只留最后一段并挡掉路径分隔,别让外部字符串决定写到哪。 */
+function sanitizeName(raw: string): string {
+  const name = basename(raw).replace(/[^A-Za-z0-9._-]/g, '_');
+  return name === '' || name === '.' || name === '..' ? 'unknown' : name;
+}
+
 /** 候选请求 → ComfyUI 的一次提交 + 把产物取回本机(登记交给调用方,它才看得到工程现状)。 */
 async function generateShot(
   runtime: VidroomRuntime,
   request: NewRequest,
   runId: string,
   store: RunStore,
-): Promise<{ localPath: string; filename: string }> {
+): Promise<{ localPath: string; filename: string; result: H3RunResult }> {
   const h3Request = {
     prompt: request.prompt,
     ...(request.seed === undefined ? {} : { seed: request.seed }),
@@ -76,8 +82,25 @@ async function generateShot(
   const result = await h3Run(runtime, h3Request);
   const media = result.media.find((item) => item.kind === 'video') ?? result.media[0];
   if (media === undefined) throw new VidroomError('RENDER_FAILED', `H3 跑完没给产物(promptId=${result.promptId})`);
-  const downloadPath = join(store.dirOf(runId), 'downloads', media.filename);
-  mkdirSync(join(store.dirOf(runId), 'downloads'), { recursive: true });
+  const downloadsDir = join(store.dirOf(runId), 'downloads');
+  mkdirSync(downloadsDir, { recursive: true });
+  // ComfyUI 报回来的文件名**不可信**:只取最后一段,再核解析后的路径确实落在 downloads 里。
+  const safeName = basename(media.filename);
+  if (safeName === '' || safeName === '.' || safeName === '..') {
+    throw new VidroomError('RENDER_FAILED', `ComfyUI 给的文件名不能用:${media.filename}`);
+  }
+  const downloadPath = resolve(downloadsDir, safeName);
+  if (!downloadPath.startsWith(`${resolve(downloadsDir)}${sep}`)) {
+    throw new VidroomError('RENDER_FAILED', `ComfyUI 给的文件名越出下载目录:${media.filename}`);
+  }
+  // 实际提交的图 + 实际参数落盘:随机 seed 只在这一次知道,不记下来就重放不了。
+  const recordDir = join(store.dirOf(runId), 'h3');
+  mkdirSync(recordDir, { recursive: true });
+  writeFileSync(
+    join(recordDir, `${sanitizeName(result.promptId)}.json`),
+    `${JSON.stringify({ request: h3Request, effectiveParams: result.effectiveParams, graph: result.graph }, null, 2)}\n`,
+    'utf8',
+  );
   // 取回本机:失败只重试这一步 —— 这一步不会再往队列里投任务。
   let localPath = downloadPath;
   try {
@@ -85,7 +108,7 @@ async function generateShot(
   } catch {
     localPath = await runtime.client().fetchMedia(media, downloadPath);
   }
-  return { localPath, filename: media.filename };
+  return { localPath, filename: safeName, result };
 }
 
 /** 跑一条 run:`target: candidates` 只出候选,`final` 只合成。 */
@@ -101,6 +124,15 @@ export async function renderProject(
 
   // ① 哈希闸:对不上就什么都不做(连 plan 的成本都省了)。
   const before = projectHash(project);
+  // 锁定的工作流要能和当前仓里的图对上 —— plan 是按锁定哈希算配方的,执行却用仓里的图,不一致就是跑错图。
+  const lockedWorkflow = project.locks?.workflow?.sha256;
+  const currentWorkflow = h3WorkflowHash();
+  if (lockedWorkflow !== undefined && lockedWorkflow !== currentWorkflow) {
+    throw new VidroomError(
+      'WORKFLOW_MISMATCH',
+      `工程锁的是工作流 ${lockedWorkflow.slice(0, 12)},当前仓里的图是 ${currentWorkflow.slice(0, 12)};重新 lock 或换回那份图再跑`,
+    );
+  }
   if (request.expectedProjectHash !== undefined && request.expectedProjectHash !== before) {
     throw new VidroomError(
       'PROJECT_HASH_MISMATCH',
@@ -114,7 +146,10 @@ export async function renderProject(
     ...(request.budget === undefined ? {} : { budget: request.budget }),
     receipts: readReceipts(request.dir),
   });
-  if (request.planHash !== undefined) assertPlanHash(plan, request.planHash);
+  if (request.planHash === undefined) {
+    throw new VidroomError('PLAN_HASH_MISMATCH', '渲染要带 planHash(先 vidroom_plan 拿一份),不带不跑');
+  }
+  assertPlanHash(plan, request.planHash);
   if (!plan.ready) {
     const budgetProblem = plan.blockers.some((blocker) => blocker.includes('BUDGET_EXCEEDED'));
     const alignmentProblem = plan.blockers.some((blocker) => blocker.includes('ALIGNMENT_REQUIRED'));
@@ -179,7 +214,7 @@ async function runCandidates(
     if (targets.length === 0) targets.push(...working.shots.filter((shot) => shot.id === request.shotId));
     const startedAt = Date.now();
     try {
-      const { localPath } = await generateShot(runtime, request, runId, store);
+      const { localPath, result } = await generateShot(runtime, request, runId, store);
       const asset = await importAsset(store.projectDir, {
         sourcePath: localPath,
         kind: 'video',
@@ -197,7 +232,8 @@ async function runCandidates(
           shotId: target.id,
           assetId: asset.id,
           recipeHash: request.recipeHash,
-          ...(request.seed === undefined ? {} : { seed: request.seed }),
+          seed: result.effectiveParams.seed,
+          promptId: result.promptId,
           actual: {
             width: asset.probe?.width ?? request.width,
             height: asset.probe?.height ?? request.height,
@@ -215,6 +251,8 @@ async function runCandidates(
           state: 'succeeded',
           candidateId: id,
           assetId: asset.id,
+          promptId: result.promptId,
+          seed: result.effectiveParams.seed,
           width: full.actual.width,
           height: full.actual.height,
           frames: full.actual.frames,
@@ -343,6 +381,8 @@ export interface VariantSpec {
   id: string;
   patch: PatchOp[];
   seedByShot?: Record<string, number>;
+  /** action=plan 拿到的这份变体计划的哈希;run 时必须给,不给不跑。 */
+  planHash?: string;
 }
 
 export interface VariantBatch {
@@ -362,13 +402,26 @@ export async function renderVariants(
     target: PlanTarget;
     variants: VariantSpec[];
     action: 'plan' | 'run';
-    planHash?: string;
     expectedProjectHash?: string;
     budget?: Partial<Budget>;
   },
 ): Promise<VariantBatch> {
   const budget = { ...project.budget, ...request.budget };
   if (request.variants.length === 0) throw new VidroomError('PROJECT_INVALID', 'variants 是空的');
+  // 基工程先把哈希核一遍:变体都是从它派生出来的,它变了整批变体就不作数。
+  const baseHash = projectHash(project);
+  if (request.expectedProjectHash !== undefined && request.expectedProjectHash !== baseHash) {
+    throw new VidroomError(
+      'PROJECT_HASH_MISMATCH',
+      `工程已经变了(现在是 ${baseHash.slice(0, 12)},收到 ${request.expectedProjectHash.slice(0, 12)});重新读工程再跑变体`,
+    );
+  }
+  if (request.action === 'run' && request.variants.some((variant) => variant.planHash === undefined)) {
+    throw new VidroomError(
+      'PLAN_HASH_MISMATCH',
+      'action=run 时每条变体都要带上 action=plan 拿到的那份 planHash;不带不跑',
+    );
+  }
   if (request.variants.length > budget.maxVariants) {
     throw new VidroomError(
       'BUDGET_EXCEEDED',
@@ -420,7 +473,7 @@ export async function renderVariants(
       const result = await renderProject(runtime, variantProject, {
         dir: request.dir,
         target: request.target,
-        ...(request.planHash === undefined ? {} : { planHash: request.planHash }),
+        planHash: variant.planHash ?? '',
         budget,
         writeBack: false,
         variantId: variant.id,

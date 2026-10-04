@@ -345,11 +345,15 @@ function projectHandlers(
           }
           const dir = projectDirOf(strField(body, 'path'));
           const current = readProject(dir);
+          const planHash = strField(body, 'planHash');
+          if (planHash.trim() === '') {
+            throw new VidroomError('PLAN_HASH_MISMATCH', '渲染要带 planHash(先 POST /vidroom/plan 拿一份),不带不跑');
+          }
           const started = await startRender(runtime, {
             dir,
             mode,
             expectedProjectHash: typeof body.expectedProjectHash === 'string' ? body.expectedProjectHash : undefined,
-            planHash: typeof body.planHash === 'string' ? body.planHash : undefined,
+            planHash,
             budget: budgetFrom(body, current.budget),
           });
           sendJson(response, 200, { ok: true, ...started, job: jobView(dir, started.runId) });

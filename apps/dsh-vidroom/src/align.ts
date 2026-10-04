@@ -14,12 +14,15 @@
 import { VidroomError } from './errors.js';
 import { H3_FPS } from './frames.js';
 import {
+  canonicalJson,
   scriptHash as hashScript,
   segmentStartFrame,
+  sha256Of,
   type Alignment,
   type Anchor,
   type Effect,
   type Project,
+  type ShotEdit,
   type Style,
 } from './project.js';
 
@@ -36,6 +39,20 @@ export interface AlignInput {
   audioHash: string;
   scriptHash: string;
   wordWindows: WordWindow[];
+}
+
+/** 裁切/变速指纹:词窗是按帧量的,镜头一裁一变速,旧词窗就对不上了。 */
+export function shotEditHash(edit: ShotEdit): string {
+  return sha256Of(canonicalJson(edit));
+}
+
+/** 还没有镜头时的对齐指纹:镜头后来补上了、或裁切/变速变了,都对不上。 */
+export const NO_SHOT_EDIT = 'no-shot';
+
+/** 一个段此刻的裁切/变速指纹(没有镜头就是 `no-shot`)。 */
+export function currentEditHash(project: Project, segmentId: string): string {
+  const shot = project.shots.find((item) => item.segmentId === segmentId);
+  return shot === undefined ? NO_SHOT_EDIT : shotEditHash(shot.edit);
 }
 
 /** 校订一个段的词时序。任何一处对不上就报 `ALIGNMENT_REQUIRED`。 */
@@ -76,7 +93,13 @@ export function buildAlignment(project: Project, input: AlignInput): Alignment {
     }
     previousEnd = window.endFrame;
   }
-  const assetFrames = asset.probe?.frames;
+  // 纯音频资产没有帧数(frames=0):用时长×fps 换算成帧,词窗才有长度可校。
+  const framesOfProbe = asset.probe === undefined ? undefined : asset.probe.frames > 0 ? asset.probe.frames : undefined;
+  const fromDuration =
+    framesOfProbe === undefined && asset.probe?.durationSeconds !== undefined
+      ? Math.round((asset.probe.durationSeconds * asset.probe.fps.num) / asset.probe.fps.den)
+      : undefined;
+  const assetFrames = framesOfProbe ?? fromDuration;
   if (assetFrames !== undefined) {
     for (const window of input.wordWindows) {
       if (window.endFrame > assetFrames) {
@@ -92,6 +115,7 @@ export function buildAlignment(project: Project, input: AlignInput): Alignment {
     assetId: asset.id,
     audioHash: asset.sha256,
     scriptHash: currentScriptHash,
+    editHash: currentEditHash(project, segment.id),
     fps: asset.probe?.fps ?? { num: H3_FPS, den: 1 },
     method: 'manual',
     status: 'confirmed',
@@ -113,6 +137,13 @@ export function alignmentFacts(
   if (asset === undefined) return { status: 'stale', reason: `段 ${segmentId} 的对齐绑的音轨不在工程里了` };
   if (asset.sha256 !== alignment.audioHash) {
     return { status: 'stale', reason: `段 ${segmentId} 的音轨换过,对齐作废` };
+  }
+  // 音轨清单换了(local 模式下 alignment 必须指着清单里的某一轨),对齐跟着作废。
+  if (project.audio !== undefined && project.audio.mode === 'local' && !project.audio.assetIds.includes(alignment.assetId)) {
+    return { status: 'stale', reason: `段 ${segmentId} 的音轨已经不在 audio.assetIds 里了,对齐作废` };
+  }
+  if (alignment.editHash !== currentEditHash(project, segmentId)) {
+    return { status: 'stale', reason: `段 ${segmentId} 的裁切或语速改过,词窗作废` };
   }
   return { status: 'ok' };
 }

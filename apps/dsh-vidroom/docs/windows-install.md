@@ -152,6 +152,8 @@ dsh plugin --profile desktop add (Resolve-Path .\dsh-vidroom-0.1.0.tgz)
 %USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml      # 这个 profile 通常是 desktop
 ```
 
+> 数据目录以 dsh 实际装在哪为准(\`%USERPROFILE%\.dsh\` 是默认位置;dsh 里能查到当前的数据根)。
+
 那个文件本来就是一个 YAML 数组(每条 `- id:` / `name:` / `config:`),**在数组里加一条**:
 
 ```yaml

@@ -131,7 +131,8 @@ function statusFor(error: unknown): number {
     case 'ALREADY_RUNNING':
       return 409;
     case 'PROJECT_BUSY':
-      // 瞬态并发冲突(另一个写者正在写这条工程),不是请求写错了。
+      // 写冲突或锁状态异常(锁在别的写者手里、手里的锁被删/被替、上次崩了留下的旧锁不会自动清):
+      // 重试可能就好了,但不是请求写错了。
       return 409;
     case 'LOCAL_ONLY':
     case 'REFERENCE_LOCAL_REQUIRED':

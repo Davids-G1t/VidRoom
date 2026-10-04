@@ -8,9 +8,9 @@
  *
  * 写入口只有三个、不许旁路:`writeProject`(整份写:新建工程的空壳、夹具/测试)、
  * `updateProject`(锁内读-改-写一条)、`applyPatch`(白名单 patch 的纯函数:只算出新工程,不落盘;
- * `baseHash` 的核对在 `updateProject` 里)。生产路径里直接调 `writeProject` 的只有「新建一条工程时落空壳」
- * 那一处(它已经在 `withProjectLock` 里,且只在文件还不存在时写);其余改写一律走 `updateProject`
- * —— 它是唯一带跨进程互斥与乐观复核的写路径。
+ * `baseHash` 的核对在 `updateProject` 里)。生产路径里直接调 `writeProject` 的只有新建空壳那两条
+ * (建工程与首次登记参片:都在 `withProjectLock` 里,且只在文件还不存在时写);其余改写一律走
+ * `updateProject` —— 它是唯一带跨进程互斥与乐观复核的写路径。
  */
 
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -57,7 +57,7 @@ export function readProject(dir: string): Project {
  * 为什么存在:工程写者不止一个(面板、导入、正在跑的渲染回写、CLI),而「读 → 算新工程 → 写」
  * 中间又夹着秒级的 IO(哈希/探针/生成),拿开头那份整份写回去就把这中间别人的改动抹了。
  *
- * 两道防:①**跨进程文件锁**(`.project.vr.json.lock`)—— 别的前端(dsh 容器里的面板、CLI、另一个
+ * 两道防:①**跨进程文件锁**(`project.vr.json.lock`)—— 别的前端(dsh 容器里的面板、CLI、另一个
  * 渲染进程)也写同一条工程,锁让「读-合并-写」不会交叉;②锁内再核一次哈希 —— 若有写者不守锁
  * (老的进程、手工改文件),就重读重并,最多 `UPDATE_ATTEMPTS` 次。
  *
@@ -88,15 +88,14 @@ export function updateProject(
   });
 }
 
-/** 上面那个复核循环的上限:撞这么多次就不是运气差,是有别的写者在反复刷。 */
+/**
+ * 上面那个复核循环的上限:撞这么多次就不是运气差,是有别的写者在反复刷。
+ */
 const UPDATE_ATTEMPTS = 5;
 
 /** 等锁的上限与步长:40 × 5ms = 200ms —— 锁内只有同步的读/算/写,正常毫秒级就放。 */
 const LOCK_TRIES = 40;
 const LOCK_WAIT_MS = 5;
-
-/** 本进程已持有的锁(同一进程内读-改-写嵌一层时不至于自己把自己锁死)。键是锁文件,值是我写进去的令牌。 */
-const heldLocks = new Map<string, string>();
 
 /** 让出 LOCK_WAIT_MS 毫秒再重试(同步等,不把调用点染成 async)。 */
 const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
@@ -134,16 +133,11 @@ export function lockFileOf(dir: string): string {
  */
 export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) => T): T {
   const lock = lockFileOf(dir);
-  const held = heldLocks.get(lock);
-  // 重入:外面那层已经把进程内的写者排完队了。
-  if (held !== undefined) return run(() => assertOwned(lock, held));
   const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   acquireLock(dir, lock, token);
-  heldLocks.set(lock, token);
   try {
     return run(() => assertOwned(lock, token));
   } finally {
-    heldLocks.delete(lock);
     releaseLock(lock, token);
   }
 }

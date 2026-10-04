@@ -1710,9 +1710,9 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(existsSync(projectFileOf(dir))).toBe(false);
   }, 30_000);
 
-  it('旧锁一律不自动抢(崩了的 / 卡住的 / 没内容三种形态)→ PROJECT_BUSY,锁原样留着,报错说得出是谁的', () => {
+  it('旧锁一律不自动抢(崩溃的 / 活人卡住的 / 空锁 / 坏 pid 四种形态)→ PROJECT_BUSY,锁原样留着,报错说得出是谁的', () => {
     // 回收一把「看着像废锁」的锁只能先看后删 —— 那两步之间锁可能换主,删下去删的就是别人的活锁。
-    // 所以这里三种形态一律动都不动:报错里说清楚是哪把、谁留的、躺了多久,让人确认后手删。
+    // 所以这里四种形态一律动都不动:报错里说清楚是哪把、谁留的、躺了多久,让人确认后手删。
     const stale = new Date(Date.now() - 120_000);
     const shapes: Array<{ name: string; content: string }> = [
       { name: 'project-dead-holder', content: `crashed-process-token ${deadPid()}\n` },
@@ -1826,41 +1826,49 @@ describe('工程写锁(跨进程互斥)', () => {
     expect(existsSync(lock)).toBe(false);
   }, 60_000);
 
-  it('两个进程同时改同一条工程 → 一次写都不丢(锁是跨进程串行的)', async () => {
+  it('一个进程拿着锁在写、另一个进程同时写 → 被锁挡下,工程只动了一次(真跨进程,不靠调度运气)', async () => {
     const projectDir = seedProject('project-lock-race');
     const before = readProject(projectDir);
-    const rounds = 30;
-    const outs = [join(dir, 'race-0.out'), join(dir, 'race-1.out')];
+    const held = join(dir, 'race.held');
+    const holderOut = join(dir, 'race-holder.out');
+    const contenderOut = join(dir, 'race-contender.out');
     // 子进程要 import 到 src/*.ts,所以第二个进程也走 vitest(它自己解析 TS)而不是裸 node。
-    const raceEnv = (index: number) => ({
-      ...process.env,
-      VR_LOCK_RACE_DIR: projectDir,
-      VR_LOCK_RACE_ROUNDS: String(rounds),
-      VR_LOCK_RACE_OUT: outs[index] ?? '',
-    });
-    const race = (index: number) =>
+    const child = (env: Record<string, string>) =>
       run('corepack', ['pnpm', 'exec', 'vitest', 'run', 'test/lock-race-child.test.ts'], {
         cwd: process.cwd(),
-        env: raceEnv(index),
+        env: { ...process.env, ...env },
         maxBuffer: 8 * 1024 * 1024,
       });
 
-    // 起跑线:两个子进程各自就位(`.ready`)之后才放行(`.go`)。没这一步,两边可能一先一后
-    // 各跑完 30 轮 —— 那时就算锁是坏的,revision 也是 60,这条用例永远绿。
-    const children = outs.map((_, index) => race(index));
-    const ready = outs.map((file) => `${file}.ready`);
-    const startedBy = Date.now() + 30_000;
-    while (!(existsSync(ready[0] as string) && existsSync(ready[1] as string))) {
-      if (Date.now() > startedBy) throw new Error('两个子进程没在规定时间里就位');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    for (const file of outs) writeFileSync(`${file}.go`, '');
-    await Promise.all(children);
+    // 拿锁那个:拿住之后在临界区里等对方那一下(它的尝试结果落地了才放锁)。
+    const holder = child({
+      VR_LOCK_CHILD_MODE: 'hold',
+      VR_LOCK_CHILD_DIR: projectDir,
+      VR_LOCK_CHILD_OUT: holderOut,
+      VR_LOCK_CHILD_HELD: held,
+      VR_LOCK_CHILD_WAIT_OUT: contenderOut,
+    });
+    // 抢的那个:等 `.held` 出现(对方确实在临界区里)才动手 —— 自己不看时间,就不会被调度运气放过去。
+    const contender = child({
+      VR_LOCK_CHILD_MODE: 'contend',
+      VR_LOCK_CHILD_DIR: projectDir,
+      VR_LOCK_CHILD_OUT: contenderOut,
+      VR_LOCK_CHILD_HELD: held,
+    });
+    await Promise.all([holder, contender]);
 
-    const written = outs.map((file) => Number.parseInt(readFileSync(file, 'utf8').trim(), 10));
-    // 两边都真写过(否则这条测不到任何并发),而且一次都没丢:总数 = 最终 revision 的增量 ——
-    // 两次写并进同一个临界区时,后写的那份会把先写的删掉,这条就对不上。
-    expect(written).toEqual([rounds, rounds]);
-    expect(readProject(projectDir).revision).toBe(before.revision + rounds * 2);
+    // 没锁的实现里这边会写成功 —— 这条就对不上。
+    expect(readFileSync(contenderOut, 'utf8').trim()).toBe('PROJECT_BUSY');
+    expect(readFileSync(holderOut, 'utf8').trim()).toBe('wrote');
+    // 被挡下的那次一点没写:只动了拿锁那个的一次。
+    expect(readProject(projectDir).revision).toBe(before.revision + 1);
+    // 两个进程都收工之后锁没留下,下个人还能正常写。
+    expect(existsSync(lockFileOf(projectDir))).toBe(false);
+    const after = updateProject(projectDir, (current) => ({
+      ...current,
+      revision: current.revision + 1,
+      parentHash: projectHash(current),
+    }));
+    expect(after.revision).toBe(before.revision + 2);
   }, 180_000);
 });

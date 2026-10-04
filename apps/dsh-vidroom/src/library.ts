@@ -153,12 +153,19 @@ function parseSteps(block: string, source: string): WorkflowStep[] {
   return steps;
 }
 
-/** 解析一份 SKILL.md。 */
-export function parseSkill(text: string, source = 'SKILL.md'): Omit<LibraryWorkflow, 'slug' | 'text'> {
+/** 解析一份 SKILL.md。给了 `expectedSlug`(目录名)就一并核「slug 必须等于 frontmatter 的 name」。 */
+export function parseSkill(
+  text: string,
+  source = 'SKILL.md',
+  expectedSlug?: string,
+): Omit<LibraryWorkflow, 'slug' | 'text'> {
   const { frontmatter, body } = splitFrontmatter(text, source);
   const fields = parseFrontmatter(frontmatter, source);
   const name = fields.name ?? '';
   if (name === '') throw new SkillParseError(`${source}:frontmatter 缺 name`);
+  if (expectedSlug !== undefined && name !== expectedSlug) {
+    throw new SkillParseError(`${source}:frontmatter 的 name(${name})和目录名(${expectedSlug})对不上 —— slug 必须等于 name`);
+  }
   const block = /```workflow\n([\s\S]*?)```/.exec(body);
   if (block === null) throw new SkillParseError(`${source}:找不到 \`\`\`workflow 代码块`);
   return {
@@ -173,7 +180,7 @@ export function parseSkill(text: string, source = 'SKILL.md'): Omit<LibraryWorkf
 function readWorkflow(dir: string, slug: string): LibraryWorkflow {
   const file = join(dir, slug, 'SKILL.md');
   const text = readFileSync(file, 'utf8');
-  const parsed = parseSkill(text, `workflows/${slug}/SKILL.md`);
+  const parsed = parseSkill(text, `workflows/${slug}/SKILL.md`, slug);
   return { slug, ...parsed, text };
 }
 

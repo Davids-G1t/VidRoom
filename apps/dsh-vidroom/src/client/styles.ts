@@ -17,6 +17,7 @@ export const CSS = `
 .dvr-head-actions { display: flex; align-items: center; gap: 6px; }
 .dvr-body { overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .dvr-env { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.dvr-detail { display: flex; flex-direction: column; gap: 8px; }
 .dvr-env--bad { color: var(--dsw-alias-state-error-primary); }
 .dvr-list { display: flex; flex-direction: column; gap: 6px; }
 .dvr-item {

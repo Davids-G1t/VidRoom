@@ -50,6 +50,13 @@ describe('工作流库', () => {
     expect(() => parseSkill(noSteps, 'x/SKILL.md')).toThrow(/没有解析出任何步骤/);
   });
 
+  it('slug 必须等于 frontmatter 的 name', () => {
+    expect(() => parseSkill(skillText('h3-t2v'), 'workflows/h3-t2v-vertical/SKILL.md', 'h3-t2v-vertical')).toThrow(
+      /name\(h3-t2v\)和目录名\(h3-t2v-vertical\)对不上/,
+    );
+    expect(parseSkill(skillText('h3-t2v'), 'workflows/h3-t2v/SKILL.md', 'h3-t2v').title).toBe('主题直出(横屏 16:9)');
+  });
+
   it('解析错误是 SkillParseError', () => {
     expect(() => parseSkill('---\nname: a\n---\n```workflow\n  - id: one\n```\n', 'x/SKILL.md')).toThrow(
       SkillParseError,

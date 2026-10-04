@@ -29,9 +29,6 @@ export interface GenerateResult {
   filename: string;
 }
 
-/** 注入出片实现(工具与测试各给一份)。 */
-export type GenerateFn = (args: GenerateArgs) => Promise<GenerateResult>;
-
 /** 取值的环境。 */
 export interface RunScope {
   topic: string;

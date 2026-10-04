@@ -177,7 +177,7 @@ export function VidroomPanel(): ReactNode {
         ? h('div', { className: 'dvr-env' }, '点一份工作流看它的 SKILL.md 原文并运行。')
         : h(
             'div',
-            { style: 'display:flex;flex-direction:column;gap:8px;' },
+            { className: 'dvr-detail' },
             h('div', { className: 'dvr-env' }, `SKILL.md 原文(${current.slug})`),
             h('pre', { className: 'dvr-skill' }, skillText),
             h(

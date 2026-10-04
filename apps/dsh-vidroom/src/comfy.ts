@@ -178,25 +178,12 @@ export class ComfyUIClient {
     return { vramTotalGiB: toGiB(device.vram_total), vramFreeGiB: toGiB(device.vram_free) };
   }
 
-  /** 让 ComfyUI 中断当前任务。 */
-  async interrupt(): Promise<void> {
-    await fetch(this.url('/interrupt'), { method: 'POST', signal: AbortSignal.timeout(10_000) });
-  }
-
   /** 一个产物文件在 ComfyUI 上的播放地址(浏览器可直接 <video src=...>)。 */
   viewUrl(ref: MediaRef): string {
     const query = new URLSearchParams({ filename: ref.filename, subfolder: ref.subfolder, type: ref.type });
     return this.url(`/view?${query.toString()}`);
   }
 
-  /** 下载产物文件。 */
-  async download(ref: MediaRef): Promise<Buffer> {
-    const response = await fetch(this.viewUrl(ref), { signal: AbortSignal.timeout(120_000) });
-    if (!response.ok) {
-      throw new ComfyUIError(`下载产物失败(${response.status}):${await readError(response)}`, response.status);
-    }
-    return Buffer.from(await response.arrayBuffer());
-  }
 }
 
 /** 按扩展名判产物种类(面板据此挑播放器)。 */

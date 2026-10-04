@@ -343,7 +343,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
   const render = tool(
     'vidroom_render',
     `跑一条 run。mode=compose 只合成(复用已选定候选,ComfyUI 一次都不请求);mode=generate-missing 只补新候选(H3 串行一条条出)。` +
-      `先 vidroom_plan 拿 planHash,回来时**必填**带上(对不上不开工)。注意:这个调用等到这一跑结束才回,面板上是边跑边刷的。`,
+      `先 vidroom_plan 拿 planHash,回来时**必填**带上(对不上不开工)。校验过了就回 runId —— 不在这个调用里等它跑完,看进度用 vidroom_job。`,
     {
       projectPath: PROJECT_PATH,
       mode: { type: 'string', enum: ['compose', 'generate-missing'] },
@@ -438,7 +438,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
   const h3 = tool(
     'vidroom_h3',
     `MiniMax H3 的适配面:action=capabilities 给出可用参数域(帧数/分辨率网格、是否要显存准入)与用的工作流 id/哈希;` +
-      `给 projectPath 时连工程锁里的权重哈希一起核(不给就只能报「本机就绪」里的机器那半);` +
+      `给 projectPath 时连工程锁里点名的权重一起核「在不在盘上」(哈希复核在 run 里做),不给就只报机器那半,没核到的写在 notes 里;` +
       `action=run 按显式参数跑一次(给出提交时的完整参数快照与实测参数);action=status 按 promptId 查一次真实状态。` +
       `参数不合规会被拒(UNSUPPORTED_PARAMS),不会把请求发出去。`,
     {
@@ -458,7 +458,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
       const action = optStr(args, 'action') ?? 'capabilities';
       const status = await runtime.status(true);
       if (action === 'capabilities') {
-        // 没给工程就没有工程锁可核:`localReady` 只能代表机器那半(连得上 + 准入),这点在摘要里明说。
+        // 没给工程就没有工程锁可核:那半写进 notes(`localReady` 只代表机器那半:连得上 + 准入 + 权重在盘上)。
         const projectPath = optStr(args, 'projectPath');
         const locks = projectPath === undefined ? undefined : readProject(projectDirOf(projectPath)).locks;
         const capabilities = h3Capabilities({
@@ -466,6 +466,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
           reachable: status.reachable,
           admissionAllowed: status.admission.allowed,
           admissionReason: status.admission.reason,
+          modelsRoot: config.modelsRoot,
         });
         return {
           capabilities,
@@ -476,6 +477,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
             `本机就绪:${capabilities.localReady ? '就绪' : `未就绪(${capabilities.reasons.join('; ')})`};` +
               `${projectPath === undefined ? '工程锁未核(没给 projectPath);' : `工程锁已核(${locks?.models.length ?? 0} 个权重);`}` +
               `模型 ${H3_MODEL} · 工作流 ${capabilities.workflowId}@${capabilities.workflowHash.slice(0, 12)}`,
+            ...(capabilities.notes.length === 0 ? [] : [`没核到的:${capabilities.notes.join('; ')}`]),
           ].join('\n'),
         };
       }

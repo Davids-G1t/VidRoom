@@ -24,7 +24,7 @@ import { mountVidroomRoutes } from '../src/routes.js';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
 import { readProject, importAsset } from '../src/project-io.js';
-import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference } from '../src/project-ops.js';
+import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl } from '../src/project-ops.js';
 import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
 import { assertSupported, h3Capabilities } from '../src/adapter.js';
 import { startFakeComfy } from './support/fake-comfy.js';
@@ -1110,14 +1110,29 @@ describe('第二轮审查边界(旧行为会失败的那些)', () => {
     expect(errorCode(refused)).toBe('ALIGNMENT_REQUIRED');
 
     // 对照:文案没改时能正常出命令(证明上面拦的是「作废」而不是「本地音轨一律拦」)。
-    expect(() =>
-      buildComposeCommand(aligned, {
-        dir: projectDir,
-        runId: 'run-ok',
-        outPath: join(projectDir, 'runs', 'run-ok', 'final.mp4'),
-        tools: TOOLS,
-      }),
-    ).not.toThrow();
+    const composeArgs = {
+      dir: projectDir,
+      runId: 'run-ok',
+      outPath: join(projectDir, 'runs', 'run-ok', 'final.mp4'),
+      tools: TOOLS,
+    };
+    const ok = buildComposeCommand(aligned, composeArgs);
+    const shot0 = aligned.shots[0]!;
+    const source = aligned.candidates.find((item) => item.id === shot0.selectedCandidateId)!;
+    const samplesAt = (fps: { num: number; den: number }, frame: number): number =>
+      Math.round((frame * fps.den * 48_000) / fps.num);
+    expect(ok.filterGraph).toContain(
+      `atrim=start_sample=${samplesAt(source.actual.fps, shot0.edit.inFrame)}:end_sample=${samplesAt(source.actual.fps, shot0.edit.outFrame)}`,
+    );
+    // 素材不是 24 fps 时,裁切按**素材自己的** fps 折时间(旧行为:一律当 24 fps,每帧 2000 采样,声音裁歪)。
+    const rate30: Project = {
+      ...aligned,
+      candidates: aligned.candidates.map((item) => ({ ...item, actual: { ...item.actual, fps: { num: 30, den: 1 } } })),
+    };
+    const slow = buildComposeCommand(rate30, composeArgs);
+    expect(slow.filterGraph).toContain(
+      `atrim=start_sample=${shot0.edit.inFrame * 1600}:end_sample=${shot0.edit.outFrame * 1600}`,
+    );
   }, 60_000);
 });
 
@@ -1333,4 +1348,125 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
       await comfy.close();
     }
   }, 60_000);
+});
+
+describe('第四轮审查的回归(旧行为必须失败)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-fix4-'));
+
+  maybe('跑的时候面板手工登记占了同一个 cand-N:新候选换新 id,回执跟得上', async () => {
+    const clip = join(dir, 'clip-collide.mp4');
+    await makeClip(clip, { frames: 24, color: 'purple' });
+    const projectDir = join(dir, 'project-collide');
+    writeFixture(projectDir, (await makeFixture(projectDir, { clips: 1 })).project);
+
+    // 轮询拉长:生成期间留出足够窗口手工登记候选(现实里那是分钟级,这里用 800ms 顶替)。
+    const comfy = await startFakeComfy({ historyMisses: 2, viewFile: clip });
+    const runtime = createVidroomRuntime({
+      baseUrl: comfy.baseUrl,
+      timeoutMs: 20_000,
+      pollIntervalMs: 400,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+    });
+    try {
+      // 先把配方改掉(夹具候选是旧配方),不然 plan 直接复用、根本没有回写这一步。
+      const seeded = readProject(projectDir);
+      patchProject(projectDir, seeded, {
+        baseHash: projectHash(seeded),
+        patch: [{ op: 'replace', path: 'shots[0].generation.seed', value: 777 }],
+      });
+      const plan = await planProject(projectDir, readProject(projectDir), 'candidates');
+      expect(plan.newRequests.length).toBe(1);
+      const started = await startRender(runtime, { dir: projectDir, mode: 'generate-missing', planHash: plan.planHash });
+
+      const manual = join(dir, 'clip-manual.mp4');
+      await makeClip(manual, { frames: 24, color: 'cyan' });
+      const running = readProject(projectDir);
+      const asset = await importAsset(projectDir, {
+        sourcePath: manual,
+        kind: 'video',
+        origin: 'local',
+        existingIds: running.assets.map((item) => item.id),
+        tools: TOOLS,
+      });
+      writeFixture(projectDir, {
+        ...running,
+        revision: running.revision + 1,
+        parentHash: projectHash(running),
+        assets: [...running.assets, asset],
+      });
+      // 面板按当下的工程算 id:这里正好占掉这一跑待用的那个 `cand-N`。
+      const manualId = candidateId(readProject(projectDir).candidates.map((item) => item.id));
+      registerCandidate(projectDir, { shotId: running.shots[0]!.id, assetId: asset.id, select: false });
+      expect(readProject(projectDir).candidates.some((item) => item.id === manualId)).toBe(true);
+
+      expect(await waitForRun(projectDir, started.runId)).not.toBe('running');
+      const after = readProject(projectDir);
+      const ids = after.candidates.map((item) => item.id);
+      // 旧行为:拿开工时那份整份回写,手工登记的那条候选连人带 id 一起没了(candidates 只剩 2 条)。
+      expect(ids).toHaveLength(3);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids).toContain(manualId);
+
+      const receipt = jobView(projectDir, started.runId).receipt!;
+      const succeeded = receipt.shots.filter((shot) => shot.state === 'succeeded');
+      expect(succeeded).toHaveLength(1);
+      const receiptCandidate = succeeded[0]!.candidateId!;
+      // 旧行为:回执记的是撞车前的 `cand-N`,工程里那条候选已经不是它的了(或者压根不存在)。
+      expect(receiptCandidate).not.toBe(manualId);
+      expect(after.candidates.some((item) => item.id === receiptCandidate)).toBe(true);
+      expect(after.shots[0]!.candidateIds).toEqual(expect.arrayContaining([manualId, receiptCandidate]));
+    } finally {
+      await comfy.close();
+    }
+  }, 60_000);
+
+  maybe('能力接口:权重不在盘上就报不就绪,没给工程就明说那半没核', () => {
+    const modelsRoot = join(dir, 'models-weights');
+    mkdirSync(modelsRoot, { recursive: true });
+    writeFileSync(join(modelsRoot, 'a.safetensors'), 'x');
+    const locks = {
+      adapterVersion: '0.1.0',
+      models: [
+        { file: 'a.safetensors', sha256: 'a'.repeat(64) },
+        { file: 'b.safetensors', sha256: 'b'.repeat(64) },
+      ],
+      fontAssetIds: [],
+      deferred: [],
+    };
+
+    // 旧行为:只看「ComfyUI 活着 + 准入通过」就报 localReady,权重缺一份也照说就绪。
+    const missing = h3Capabilities({ locks, reachable: true, admissionAllowed: true, admissionReason: '', modelsRoot });
+    expect(missing.localReady).toBe(false);
+    expect(missing.reasons.join(' ')).toContain('b.safetensors');
+
+    writeFileSync(join(modelsRoot, 'b.safetensors'), 'y');
+    const ready = h3Capabilities({ locks, reachable: true, admissionAllowed: true, admissionReason: '', modelsRoot });
+    expect(ready.localReady).toBe(true);
+    // 只核了文件在不在:哈希复核在 run 里,不能当成已核过。
+    expect(ready.notes.join(' ')).toContain('哈希复核在 run 里做');
+
+    // 没给工程:机器那半照报,权重那半不许静默当成就绪。
+    const unknown = h3Capabilities({ reachable: true, admissionAllowed: true, admissionReason: '' });
+    expect(unknown.localReady).toBe(true);
+    expect(unknown.notes.join(' ')).toContain('还没 lock');
+  });
+
+  maybe('参考来源地址:外网当文字存档收下,file:/空壳 URL 拒', () => {
+    const codeOf = (call: () => void): string => {
+      try {
+        call();
+        return '没报错';
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    };
+    // 旧行为:一律只收本机地址 —— 爆款原片这种外网参考链接根本记不进来。
+    expect(() => assertRecordedUrl('https://www.example.com/viral/123?t=3')).not.toThrow();
+    expect(() => assertRecordedUrl('http://127.0.0.1:8000/x')).not.toThrow();
+    expect(codeOf(() => assertRecordedUrl('file:///etc/passwd'))).toBe('PROJECT_INVALID');
+    expect(codeOf(() => assertRecordedUrl('data:text/plain,hi'))).toBe('PROJECT_INVALID');
+    expect(codeOf(() => assertRecordedUrl('随便写的'))).toBe('PROJECT_INVALID');
+  });
 });

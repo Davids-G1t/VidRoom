@@ -154,7 +154,7 @@ function ProjectActions(props: {
   const [newProjectId, setNewProjectId] = useState('');
   const [referencePath, setReferencePath] = useState('');
   const [referenceUrl, setReferenceUrl] = useState('');
-  const [patchText, setPatchText] = useState('[{ "op": "replace", "path": "/shots/0/text", "value": "新文案" }]');
+  const [patchText, setPatchText] = useState('[{ "op": "replace", "path": "shots[0].generation.prompt", "value": "改成你要的画面描述" }]');
   const [importPath, setImportPath] = useState('');
   const [importKind, setImportKind] = useState('video');
   const [shotId, setShotId] = useState('');
@@ -302,7 +302,7 @@ function ProjectActions(props: {
       }),
       h('button', { className: 'dvr-btn', type: 'button', onClick: () => void registerRef() }, '登记参考片'),
     ),
-    area('改工程(白名单 JSON Patch;文案/提示词/种子/选候选/样式)', patchText, setPatchText),
+    area('改工程(白名单 JSON Patch;镜头用下标:shots[0].generation.prompt / shots[0].edit.inFrame)', patchText, setPatchText),
     h(
       'div',
       { className: 'dvr-field' },

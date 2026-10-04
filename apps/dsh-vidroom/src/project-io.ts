@@ -7,7 +7,7 @@
  * patch 都直接拒掉 —— 不接受任意代码 patch。
  */
 
-import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 import { VidroomError } from './errors.js';
 import { probeMedia, sha256File, type MediaTools, type Probe } from './media.js';
@@ -105,6 +105,15 @@ export interface ImportOptions {
 }
 
 /** 把外部文件复制进 `assets/`,算 sha256、探一次媒体属性(字体/工作流不探)。 */
+/** `assets/` 里已经占掉的 id:光看工程里的记录不够 —— 同一个 id 换个后缀就是另一个文件。 */
+function assetIdsOnDisk(dir: string): string[] {
+  const assetsDir = join(dir, 'assets');
+  if (!existsSync(assetsDir)) return [];
+  return readdirSync(assetsDir)
+    .map((name) => name.replace(/\.[^.]+$/, ''))
+    .filter((stem) => /^(asset|font)-\d+$/.test(stem));
+}
+
 export async function importAsset(dir: string, options: ImportOptions): Promise<Asset> {
   const source = resolve(options.sourcePath);
   if (!existsSync(source)) {
@@ -122,7 +131,9 @@ export async function importAsset(dir: string, options: ImportOptions): Promise<
 
   // 排一个真没人占的路径:光看工程里的 id 不够 —— 变体各自从同一份快照起跑,
   // 会算出同一个 `asset-N` 然后把别人刚生成的素材覆盖掉。所以用 O_EXCL 占位,撞了就换下一个 id。
-  const taken = new Set<string>(options.existingIds);
+  // 盘上已有的文件名也要算进去:同名不同后缀(`asset-1.wav` 与 `asset-1.mp4`)是两份资产,
+  // 但 id 是同一个 —— 那样工程里会出现两个 `asset-1`,谁引用谁都说不清。
+  const taken = new Set<string>([...options.existingIds, ...assetIdsOnDisk(dir)]);
   let id = '';
   let relativePath = '';
   let target = '';

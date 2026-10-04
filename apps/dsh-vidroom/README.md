@@ -83,7 +83,7 @@ dsh plugin --profile <profile> remove dsh-vidroom
 
 | 申请 | 落地情况 |
 | --- | --- |
-| **R1 可检查、可重放的 H3 底座** | 已落(工具本身要 `chatTools` 打开才注册):`vidroom_h3` 的 `capabilities` 给参数域/工作流 id 与哈希/本机就绪与缺什么(`projectPath` 可选:给了就连工程锁里的权重哈希一起核,不给只报机器那半);`run` 按显式参数跑并把参数快照与实测值一起带回;`status` 按 promptId 查真实状态。不支持的种子/尺寸/帧数回 `UNSUPPORTED_PARAMS`,不静默忽略。原 `vidroom_generate` 签名与行为未改。 |
+| **R1 可检查、可重放的 H3 底座** | 已落(工具本身要 `chatTools` 打开才注册):`vidroom_h3` 的 `capabilities` 给参数域/工作流 id 与哈希/本机就绪与缺什么(`projectPath` 可选:给了就核锁里点名的权重在不在盘上,不给就只报机器那半,没核到的写在 `notes` 里;哈希复核在 `run` 里做);`run` 按显式参数跑并把参数快照与实测值一起带回;`status` 按 promptId 查真实状态。不支持的种子/尺寸/帧数回 `UNSUPPORTED_PARAMS`,不静默忽略。原 `vidroom_generate` 签名与行为未改。 |
 | **R2 带出处的本地素材与剪辑底座** | 已落:`vidroom_assets` 列资产(绝对路径 + 缺件)、`vidroom_import_asset` 登记外部文件、`vidroom_candidate_add` 手工登记候选;生成素材立刻取回并复制进 `assets/` 并登记 sha256,不靠 ComfyUI 内存历史复跑。第 1 批的 runner 未重写;镜头候选索引、词锚编译与工程渲染都在第 2 批(`compose.ts` / `align.ts`)。 |
 | **R3 本地执行与恢复** | 已落:只连回环地址、拒重定向到外网、路径/哈希/模型在执行端校验;job 状态为 `queued/running/succeeded/failed/cancelled`,工程 run 另有 `awaiting-selection/awaiting-alignment`;按 promptId 查既有任务(未知状态如实报待核,不自动重投);缺 ffmpeg/权重不自动下载;H3 的准入与「AI-generated with MiniMax H3」标名照旧。 |
 

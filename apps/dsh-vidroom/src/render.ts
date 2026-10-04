@@ -64,13 +64,47 @@ function sanitizeName(raw: string): string {
 /**
  * 生成期间有人改过工程时的回写方式:只把我们这一跑新加的资产/候选并过去,
  * 别人的 patch、别人导的素材、别人选定的候选都不动 —— 拿开工时那份整份覆盖会把它们抹掉。
+ *
+ * 生成是分钟级的,这期间面板可以手工登记候选,撞上同一个 `cand-N` 是可能的:
+ * 撞了就给新候选换一个 id,并把映射交回调用方(回执里那个 id 得真的指向跑出来的东西)。
+ * 资产撞 id 不能这么化 —— 文件已经在 `assets/` 里占着那个名 —— 所以直接报错,不装作登记成功。
  */
-function mergeGenerated(current: Project, ran: Project, newCandidateIds: string[]): Project {
-  const assetIds = new Set(current.assets.map((asset) => asset.id));
-  const candidateIds = new Set(current.candidates.map((candidate) => candidate.id));
-  const mine = new Set(newCandidateIds);
-  const addedAssets = ran.assets.filter((asset) => !assetIds.has(asset.id));
-  const addedCandidates = ran.candidates.filter((candidate) => mine.has(candidate.id) && !candidateIds.has(candidate.id));
+function mergeGenerated(
+  current: Project,
+  ran: Project,
+  incoming: { candidateIds: string[]; startAssetIds: Set<string> },
+): { project: Project; idMap: Map<string, string> } {
+  const currentAssetIds = new Set(current.assets.map((asset) => asset.id));
+  const addedAssets = ran.assets.filter((asset) => !incoming.startAssetIds.has(asset.id));
+  const clashed = addedAssets.find((asset) => currentAssetIds.has(asset.id));
+  if (clashed !== undefined) {
+    throw new VidroomError('RENDER_FAILED', `资产 id 撞车(${clashed.id}):别的东西占了这个 id,这一跑的素材没登记进工程`);
+  }
+
+  const taken = new Set(current.candidates.map((candidate) => candidate.id));
+  const mine = new Set(incoming.candidateIds);
+  const idMap = new Map<string, string>();
+  const addedCandidates: Project['candidates'] = [];
+  for (const candidate of ran.candidates) {
+    if (!mine.has(candidate.id)) continue;
+    const existing = current.candidates.find((item) => item.id === candidate.id);
+    if (existing !== undefined) {
+      const same =
+        existing.assetId === candidate.assetId &&
+        existing.shotId === candidate.shotId &&
+        existing.recipeHash === candidate.recipeHash;
+      // 同一条已经在工程里了(同一份回写跑两遍):不重复登记。
+      if (same) continue;
+      const id = nextId('cand', taken);
+      taken.add(id);
+      idMap.set(candidate.id, id);
+      addedCandidates.push({ ...candidate, id });
+      continue;
+    }
+    taken.add(candidate.id);
+    addedCandidates.push(candidate);
+  }
+
   const byShot = new Map<string, string[]>();
   for (const candidate of addedCandidates) {
     const list = byShot.get(candidate.shotId) ?? [];
@@ -78,16 +112,19 @@ function mergeGenerated(current: Project, ran: Project, newCandidateIds: string[
     byShot.set(candidate.shotId, list);
   }
   return {
-    ...current,
-    revision: current.revision + 1,
-    parentHash: projectHash(current),
-    assets: [...current.assets, ...addedAssets],
-    candidates: [...current.candidates, ...addedCandidates],
-    shots: current.shots.map((shot) => {
-      const add = byShot.get(shot.id);
-      if (add === undefined || add.length === 0) return shot;
-      return { ...shot, candidateIds: [...shot.candidateIds, ...add.filter((id) => !shot.candidateIds.includes(id))] };
-    }),
+    idMap,
+    project: {
+      ...current,
+      revision: current.revision + 1,
+      parentHash: projectHash(current),
+      assets: [...current.assets, ...addedAssets],
+      candidates: [...current.candidates, ...addedCandidates],
+      shots: current.shots.map((shot) => {
+        const add = byShot.get(shot.id);
+        if (add === undefined || add.length === 0) return shot;
+        return { ...shot, candidateIds: [...shot.candidateIds, ...add.filter((id) => !shot.candidateIds.includes(id))] };
+      }),
+    },
   };
 }
 
@@ -305,6 +342,8 @@ async function runCandidates(
   const shots: RunShot[] = [...receipt.shots];
   const newCandidateIds: string[] = [];
   let working = structuredClone(project) as Project;
+  // 开工时工程里已经有哪些资产 —— 回写时靠它认哪几个是这一跑新加的。
+  const startAssetIds = new Set(project.assets.map((asset) => asset.id));
 
   // 同配方的镜头:plan 只发一条请求(recipeHash 去重),生成一次,这里把同一个 asset 登记给每条镜头。
   const recipeOf = (shot: Project['shots'][number]): string =>
@@ -431,9 +470,29 @@ async function runCandidates(
       // 生成是分钟级的,这期间别人可能已经 patch 过、导过素材、选过候选:
       // 重读当前工程,只把我们这一跑新加的并进去。拿开工时那份整份覆盖会把这些抹掉。
       const latest = readProject(ctx.request.dir);
-      working = mergeGenerated(latest, working, newCandidateIds);
+      const merged = mergeGenerated(latest, working, { candidateIds: newCandidateIds, startAssetIds });
+      working = merged.project;
       writeProject(ctx.request.dir, working);
       hashAfter = projectHash(working);
+      if (merged.idMap.size > 0) {
+        // 你跑的时候面板手工登记过候选,占掉了同一个 `cand-N`:上面换了 id,回执与返回值得一起跟上。
+        for (const [index, id] of newCandidateIds.entries()) {
+          const mapped = merged.idMap.get(id);
+          if (mapped !== undefined) newCandidateIds[index] = mapped;
+        }
+        shots.splice(
+          0,
+          shots.length,
+          ...shots.map((shot) =>
+            shot.candidateId === undefined ? shot : { ...shot, candidateId: merged.idMap.get(shot.candidateId) ?? shot.candidateId },
+          ),
+        );
+        receipt = store.update(runId, { shots });
+        store.log(
+          runId,
+          `候选 id 撞车,已换新:${[...merged.idMap].map(([from, to]) => `${from}→${to}`).join('、')}(回执与返回值同步跟上)`,
+        );
+      }
       store.log(runId, `工程已登记 ${newCandidateIds.length} 个新候选,新哈希 ${hashAfter.slice(0, 12)}`);
     }
   }
@@ -463,8 +522,7 @@ async function runFinal(
 ): Promise<RenderResult> {
   const { runId, store, tools } = ctx;
   const outPath = store.outputPath(runId, project);
-  // 合成阶段只调本地 ffmpeg:这里记个数,回执里报的是真实计数。
-  let comfySubmissions = 0;
+  // 合成阶段只调本地 ffmpeg,一次 ComfyUI 请求都不发:计数是个常量 0,不是「忘了加」。
   mkdirSync(join(store.dirOf(runId)), { recursive: true });
   const composed = await composeFinal(project, {
     dir: ctx.request.dir,
@@ -500,8 +558,8 @@ async function runFinal(
       projectHashOk: plan.projectHash === projectHash(project),
       planHashOk: ctx.request.planHash === undefined || ctx.request.planHash === plan.planHash,
       // 合成阶段:一次都没往 ComfyUI 投(这个数是这段代码自己数出来的,不是写死的 0)。
-      comfySubmissions,
-      h3Requests: comfySubmissions,
+      comfySubmissions: 0,
+      h3Requests: 0,
       reusedCandidates: plan.reuseCandidateIds.length,
       ...(ffmpegVersion === undefined ? {} : { ffmpeg: ffmpegVersion }),
     },

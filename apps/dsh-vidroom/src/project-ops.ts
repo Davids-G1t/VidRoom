@@ -388,8 +388,9 @@ export async function registerReference(
 
   let dir: string;
   let project: Project;
+  let opened: { dir: string; project: Project } | undefined;
   if (input.projectPath !== undefined && existsSync(projectFileOf(projectDirOf(input.projectPath)))) {
-    const opened = openProject(input.projectPath);
+    opened = openProject(input.projectPath);
     dir = opened.dir;
     project = opened.project;
   } else {
@@ -412,6 +413,10 @@ export async function registerReference(
   }
   const detection = await detectCutFrames(resolve(dir, asset.path), tools, asset.probe);
   const shots = analysisShots(asset.probe, detection.frames);
+
+  // 上面两步是秒级的:这段时间里别人(面板、另一条会话)可能改过这份工程。
+  // 重建重读一次 —— 重新登记参考会整份换掉 reference 与 analysis,但不能连带把别人的资产/patch 盖回去。
+  if (opened !== undefined) project = readProject(dir);
 
   project.assets.push(asset);
   project.reference = {
@@ -462,7 +467,11 @@ export async function registerReference(
   };
 }
 
-/** 参考来源 URL 只做记录,但外网地址一律拒(本插件不外发)。 */
+/**
+ * 参考来源 URL 只当文字存档写在工程里,不请求它。
+ * 所以外网链接(爆款原片地址)可以记 —— 要挡的是那些「记下来就可能被当文件读」的形状
+ * (`file:` / `data:` 之类),以及空壳 URL。
+ */
 export function assertRecordedUrl(url: string): void {
   let parsed: URL;
   try {
@@ -470,9 +479,11 @@ export function assertRecordedUrl(url: string): void {
   } catch {
     throw new VidroomError('PROJECT_INVALID', `referenceUrl 不是合法 URL:${url}`);
   }
-  const host = parsed.hostname;
-  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
-    throw new VidroomError('LOCAL_ONLY', `只收本机地址,拒了 ${parsed.origin},也不去访问它`);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new VidroomError('PROJECT_INVALID', `referenceUrl 只收 http/https(只当文字存档),收到 ${parsed.protocol}`);
+  }
+  if (parsed.hostname === '') {
+    throw new VidroomError('PROJECT_INVALID', `referenceUrl 没写主机名:${url}`);
   }
 }
 
@@ -619,8 +630,6 @@ export async function startRender(
     /** 计划哈希:必填 —— 没冻结的计划不开工。 */
     planHash: string;
     budget?: Partial<Budget> | undefined;
-    /** 只在真跑时收尾调用(用于测试/集成的清理钩子)。 */
-    onSettled?: (() => void) | undefined;
   },
 ): Promise<{ runId: string; mode: string }> {
   const { prepareRun, runPrepared } = await import('./render.js');
@@ -647,7 +656,6 @@ export async function startRender(
     })
     .finally(() => {
       release();
-      request.onSettled?.();
     });
   return { runId: prepared.runId, mode: request.mode };
 }
@@ -671,11 +679,14 @@ export async function importProjectAsset(
     existingIds: current.assets.map((item) => item.id),
     tools: mediaTools(config),
   });
+  // importAsset 读文件 + 算哈希 + 跑探针是秒级的:收尾时重读一次,只把这条资产并进去。
+  // 拿开工时那份 `current` 整份回写,会把这期间别人的 patch / 别的会话导的素材盖掉。
+  const latest = readProject(dir);
   const next = validateProject({
-    ...current,
-    revision: current.revision + 1,
-    parentHash: projectHash(current),
-    assets: [...current.assets, asset],
+    ...latest,
+    revision: latest.revision + 1,
+    parentHash: projectHash(latest),
+    assets: [...latest.assets, asset],
   });
   writeProject(dir, next);
   return { asset, projectHashAfter: projectHash(next) };

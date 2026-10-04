@@ -18,10 +18,8 @@ import type { Project, Shot, Style, Timeline } from './project.js';
 import { resolveInside } from './project-io.js';
 import type { RunOutput } from './receipts.js';
 
-/** 音轨重采样到的采样率:24 fps 下每帧正好 2000 个采样。 */
+/** 音轨重采样到的采样率(与素材帧率无关,换算时拿素材自己的 fps 折算)。 */
 const AUDIO_SAMPLE_RATE = 48000;
-/** 每帧的采样数(帧 ↔ 采样换算是整数,不漂)。 */
-const SAMPLES_PER_FRAME = AUDIO_SAMPLE_RATE / 24;
 
 export interface ComposeOptions {  dir: string;
   runId: string;
@@ -130,6 +128,8 @@ interface Segment {
   /** 音轨来自独立录音(audio.mode=local)而不是候选自带:短了要补静音,保证段长对齐。 */
   localAudio?: true;
   durationFrames: number;
+  /** 这段素材自己的帧率:裁切用的 inFrame/outFrame 数的是它的帧,音轨换算得按它折时间。 */
+  sourceFps: { num: number; den: number };
 }
 
 /** 把工程编成一条 ffmpeg 命令。缺件、时钟对不上、字幕没落点都直接报错。 */
@@ -187,12 +187,15 @@ export function buildComposeCommand(project: Project, options: ComposeOptions): 
       silenceIndex += 1;
     } else {
       // atempo 只在真的变速时才有环节;空字符串会把滤镜链拼出双逗号(ffmpeg 报 No such filter: '')。
-      // 裁切用 start_sample/end_sample:atrim 没有 start_frame/end_frame,而先把音轨重采样到
-      // 48000 Hz 之后,24 fps 下每帧正好 2000 个采样,帧↔采样换算不会漂。
+      // 裁切用 start_sample/end_sample:atrim 没有 start_frame/end_frame,得自己把帧号换成采样。
+      // 换算拿的是**素材自己的** fps —— inFrame/outFrame 数的是源素材的帧,套时间轴的 24 fps
+      // 会在手工登记的 30/60 fps 素材上把声音裁歪(画面用 trim 按源帧号裁,两边就对不上了)。
+      const samplesOf = (frame: number): number =>
+        Math.round((frame * segment.sourceFps.den * AUDIO_SAMPLE_RATE) / segment.sourceFps.num);
       const tempo = atempoChain(speed).join(',');
       const crop =
-        `atrim=start_sample=${segment.shot.edit.inFrame * SAMPLES_PER_FRAME}:` +
-        `end_sample=${segment.shot.edit.outFrame * SAMPLES_PER_FRAME}`;
+        `atrim=start_sample=${samplesOf(segment.shot.edit.inFrame)}:` +
+        `end_sample=${samplesOf(segment.shot.edit.outFrame)}`;
       // 独立录音可能比这段短(没配到整段),补静音再裁到段长,免得 concat 时音画对不上。
       const pad =
         segment.localAudio === true
@@ -339,6 +342,7 @@ function segmentsOf(project: Project, dir: string, timeline: Timeline): Segment[
           ? { audioPath: videoPath }
           : {}),
       durationFrames: placement.durationFrames,
+      sourceFps: candidate.actual.fps,
     });
   }
   return segments;

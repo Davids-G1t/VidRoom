@@ -32,7 +32,7 @@ export const VIDROOM_SKILL = {
 - \`vidroom_align_words\`:按词给某段配音校订时序(词窗 → 帧),回来顺便编译字幕/特效。
 - \`vidroom_candidates\` / \`vidroom_assets\`:找已经生成的候选、列工程依赖的素材(有没有缺件)。
 - \`vidroom_variants\`:一次调用批量做变体(\`action=plan\` 先看、\`action=run\` 才跑),一条失败不影响别人。
-- \`vidroom_h3\`:H3 适配面 —— \`capabilities\`(参数域、工作流哈希、本机就绪没;带上 \`projectPath\` 会连工程锁里的权重哈希一起核,不带就只报机器那半)、\`run\`(显式参数跑一次)、\`status\`(按 promptId 查真实状态)。
+- \`vidroom_h3\`:H3 适配面 —— \`capabilities\`(参数域、工作流哈希、本机就绪没;带上 \`projectPath\` 会核锁里点名的权重在不在盘上,不带就只报机器那半,没核到的写在 \`notes\` 里)、\`run\`(显式参数跑一次)、\`status\`(按 promptId 查真实状态)。
 
 ## 复刻一条爆款怎么走
 

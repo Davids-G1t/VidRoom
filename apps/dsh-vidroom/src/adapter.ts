@@ -10,6 +10,8 @@
  * 准入(显存档、连不连得上)复用同一个闸,不绕过去。
  */
 
+import { existsSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { mediaKind, type MediaRef } from './comfy.js';
 import { VidroomError } from './errors.js';
 import { H3_FPS, H3_MAX_FRAMES, H3_MIN_FRAMES, isValidFrameCount, secondsForFrames } from './frames.js';
@@ -42,8 +44,15 @@ export interface H3Capabilities {
   };
   /** 实测过的模型哈希;没量就是 null,不凭模型名补造。 */
   modelHashes: Array<{ file: string; sha256: string }> | null;
+  /**
+   * 机器那半:连得上 + 准入过 + (给了工程锁时)锁里点名的权重在盘上。
+   * 权重只核「文件在不在」不核哈希 —— 哈希复核在 run 里做(那里有按大小+mtime 的缓存)。
+   */
   localReady: boolean;
+  /** 缺什么:每一条都让 `localReady` 为 false。 */
   reasons: string[];
+  /** 没核到、也不下结论的(比如工程还没 lock):不影响 `localReady`,但得报出来,别当成就绪。 */
+  notes: string[];
 }
 
 export interface CapabilityInput {
@@ -51,16 +60,28 @@ export interface CapabilityInput {
   reachable: boolean;
   admissionAllowed: boolean;
   admissionReason: string;
+  /** 权重目录:用来核锁里点名的权重在不在盘上。不给就核不了,理由写进 notes。 */
+  modelsRoot?: string | undefined;
 }
 
-/** 端上参数快照。`localReady` 只要有一项不满足就是 false,理由写在 reasons 里。 */
+/** 端上参数快照。`reasons` 里只要有一条,`localReady` 就是 false。 */
 export function h3Capabilities(input: CapabilityInput): H3Capabilities {
   const reasons: string[] = [];
+  const notes: string[] = [];
   if (!input.reachable) reasons.push('连不上本机 ComfyUI');
   if (!input.admissionAllowed) reasons.push(input.admissionReason);
-  if (input.locks === undefined) reasons.push('工程还没 lock 工作流与运行时');
-  if (input.locks !== undefined && input.locks.models.length === 0) {
-    reasons.push('模型哈希还没量(lock 时没算,别按模型名猜)');
+  const models = input.locks?.models ?? [];
+  if (input.locks === undefined) {
+    // 还没 lock 就不知道要核哪几份权重:机器那半照报,权重那半只能标「没核」。
+    notes.push('工程还没 lock:权重在不在盘上、工作流版本这半没核,别当成已核过');
+  } else if (models.length === 0) {
+    notes.push('lock 里没记模型哈希(lock 时没算),别按模型名猜');
+  } else if (input.modelsRoot === undefined) {
+    notes.push(`没配权重目录,核不了这 ${models.length} 份权重在不在盘上`);
+  } else {
+    const missing = models.filter((model) => !existsSync(isAbsolute(model.file) ? model.file : join(input.modelsRoot as string, model.file)));
+    if (missing.length > 0) reasons.push(`权重不在盘上:${missing.map((model) => model.file).join('、')}`);
+    if (missing.length < models.length) notes.push('权重只核了文件在不在,哈希复核在 run 里做');
   }
   return {
     workflowId: H3_WORKFLOW_ID,
@@ -84,9 +105,10 @@ export function h3Capabilities(input: CapabilityInput): H3Capabilities {
       fps: H3_FPS,
       aspects: Object.keys(ASPECT_RATIOS),
     },
-    modelHashes: input.locks === undefined || input.locks.models.length === 0 ? null : input.locks.models,
+    modelHashes: models.length === 0 ? null : models,
     localReady: reasons.length === 0,
     reasons,
+    notes,
   };
 }
 

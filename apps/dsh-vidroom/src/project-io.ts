@@ -5,6 +5,9 @@
  * 两条硬线:①工程内的资源一律相对路径且不许越出工程根(含符号链接);
  * ②patch 只走白名单,任何试图改边界字段(policy / budget / assets / candidates …)的
  * patch 都直接拒掉 —— 不接受任意代码 patch。
+ *
+ * 写入口只有三个、不许旁路:`writeProject`(整份写,给夹具/测试)、`updateProject`(读-改-写一条,带乐观复核)、
+ * `applyPatch`(白名单 patch,带 baseHash 核对)。
  */
 
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
@@ -44,6 +47,31 @@ export function readProject(dir: string): Project {
   }
   return validateProject(parsed);
 }
+
+/**
+ * 读-改-写一条工程,带乐观并发复核。
+ *
+ * 为什么存在:工程写者不止一个(面板、导入、正在跑的渲染回写、CLI),而「读 → 算新工程 → 写」
+ * 中间又夹着秒级的 IO(哈希/探针/生成),拿开头那份整份写回去就把这中间别人的改动抹了。
+ * 所以收尾前再读一次比哈希:变了就重读重并(最多 `UPDATE_ATTEMPTS` 次)。
+ *
+ * 边界的边界:复核到 `rename` 之间仍是极小的窗口 —— 本插件约定同一条工程只有一个写者**进程**
+ * (面板与渲染在同一个 dsh 进程里,进程内的同步段天然串行)。跨进程要真正的互斥得上文件锁,
+ * 本批不做:设计页 69 行要的就是「乐观并发检查」。
+ */
+export function updateProject(dir: string, merge: (current: Project) => Project): Project {
+  for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
+    const before = readProject(dir);
+    const next = merge(before);
+    if (projectHash(readProject(dir)) !== projectHash(before)) continue;
+    writeProject(dir, next);
+    return next;
+  }
+  throw new VidroomError('PROJECT_BUSY', `同一条工程被反复改写(试了 ${UPDATE_ATTEMPTS} 次),先停手再试:${dir}`);
+}
+
+/** 上面那个复核循环的上限:撞这么多次就不是运气差,是有别的写者在反复刷。 */
+const UPDATE_ATTEMPTS = 5;
 
 /** 写工程(先写临时文件再 rename,避免半截文件)。 */
 export function writeProject(dir: string, project: Project): string {

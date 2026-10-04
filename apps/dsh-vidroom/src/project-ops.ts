@@ -12,7 +12,7 @@ import { mediaTools } from './config.js';
 import { VidroomError } from './errors.js';
 import type { MediaTools, Probe } from './media.js';
 import { buildPlan, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, ensureDir, importAsset, nextId, projectFileOf, readProject, resolveInside, writeProject } from './project-io.js';
+import { applyPatch, ensureDir, importAsset, nextId, projectFileOf, readProject, resolveInside, updateProject, writeProject } from './project-io.js';
 import {
   PROJECT_FILE,
   emptyProject,
@@ -679,16 +679,16 @@ export async function importProjectAsset(
     existingIds: current.assets.map((item) => item.id),
     tools: mediaTools(config),
   });
-  // importAsset 读文件 + 算哈希 + 跑探针是秒级的:收尾时重读一次,只把这条资产并进去。
+  // importAsset 读文件 + 算哈希 + 跑探针是秒级的:收尾走 updateProject(带乐观复核),只把这条资产并进去。
   // 拿开工时那份 `current` 整份回写,会把这期间别人的 patch / 别的会话导的素材盖掉。
-  const latest = readProject(dir);
-  const next = validateProject({
-    ...latest,
-    revision: latest.revision + 1,
-    parentHash: projectHash(latest),
-    assets: [...latest.assets, asset],
-  });
-  writeProject(dir, next);
+  const next = updateProject(dir, (latest) =>
+    validateProject({
+      ...latest,
+      revision: latest.revision + 1,
+      parentHash: projectHash(latest),
+      assets: [...latest.assets, asset],
+    }),
+  );
   return { asset, projectHashAfter: projectHash(next) };
 }
 

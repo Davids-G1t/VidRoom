@@ -24,7 +24,7 @@ import { mountVidroomRoutes } from '../src/routes.js';
 import { DEFAULT_PATCH_EXAMPLE } from '../src/client/project-panel.tsx';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
-import { readProject, importAsset } from '../src/project-io.js';
+import { readProject, importAsset, updateProject, writeProject } from '../src/project-io.js';
 import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference, registerCandidate, candidateId, assertRecordedUrl, importProjectAsset } from '../src/project-ops.js';
 import { readConfig } from '../src/config.js';
 import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
@@ -1300,18 +1300,20 @@ describe('第三轮审查的回归(旧行为必须失败)', () => {
       expect(errorCode(again)).toBe('ALREADY_RUNNING');
       expect(await waitForRun(projectDir, started.runId)).not.toBe('running');
       // 跑完了锁要放掉,不然这条工程以后再也开不了(终态写盘与 finally 放锁差一拍,这里轮询等)。
+      // 故意传个假 planHash:放锁证据是「不再报 ALREADY_RUNNING、改报哈希对不上」,
+      // 顺便避开「轮询成功就真开了一条没人等的 run」这个坑。
       const deadline = Date.now() + 2_000;
-      let released = false;
-      while (!released && Date.now() < deadline) {
+      let releasedCode = 'ALREADY_RUNNING';
+      while (releasedCode === 'ALREADY_RUNNING' && Date.now() < deadline) {
         const retry = await startRender(runtime, {
           dir: projectDir,
           mode: 'generate-missing',
-          planHash: plan.planHash,
+          planHash: 'sha256:' + '0'.repeat(64),
         }).catch((error: unknown) => error);
-        released = errorCode(retry) !== 'ALREADY_RUNNING';
-        if (!released) await new Promise((resolve) => setTimeout(resolve, 20));
+        releasedCode = errorCode(retry);
+        if (releasedCode === 'ALREADY_RUNNING') await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(released).toBe(true);
+      expect(releasedCode).toBe('PLAN_HASH_MISMATCH');
     } finally {
       await comfy.close();
     }
@@ -1505,7 +1507,8 @@ describe('第五轮(合后自查)的回归', () => {
 
     const config = readConfig({ ffmpegPath: TOOLS.ffmpegPath, ffprobePath: TOOLS.ffprobePath });
     // 导入里会 await(算 sha256 + 跑探针):不等它,趁这段时间改一次工程。
-    // 旧行为:importProjectAsset 拿开工时那份整份回写,这句提示词连人带改动一起被盖回去。
+    // 旧行为(f5ec4d9 之前)是拿开工时那份整份回写,这句提示词连人带改动一起被盖回去。
+    // f5ec4d9 已改成收尾重读;本 PR 再把收尾换成 `updateProject`(带乐观哈希复核)。这条用例把它钉住。
     const importing = importProjectAsset(config, projectDir, { sourcePath: incoming, kind: 'video' });
     const mid = readProject(projectDir);
     patchProject(projectDir, mid, {
@@ -1519,7 +1522,95 @@ describe('第五轮(合后自查)的回归', () => {
     expect(after.shots[0]!.generation.prompt).toBe('导入期间改过的提示词');
   }, 60_000);
 
-  maybe('面板「改工程」的默认示例当场能应用(旧行为:示例写 /shots/0/text,点了必吃 PATCH_REJECTED)', async () => {
+  maybe('两条导入同时跑:两份资产都进工程,后收尾的不把先收尾的盖掉', async () => {
+    const projectDir = join(dir, 'project-import-parallel');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+    const first = join(dir, 'clip-p1.mp4');
+    const second = join(dir, 'clip-p2.mp4');
+    await makeClip(first, { frames: 10, color: 'red' });
+    await makeClip(second, { frames: 10, color: 'blue' });
+
+    // 两条不 await 地同时发:中间的哈希+探针会让出事件循环,两边都拿同一份旧快照开头。
+    const config = readConfig({ ffmpegPath: TOOLS.ffmpegPath, ffprobePath: TOOLS.ffprobePath });
+    const [one, two] = await Promise.all([
+      importProjectAsset(config, projectDir, { sourcePath: first, kind: 'video' }),
+      importProjectAsset(config, projectDir, { sourcePath: second, kind: 'video' }),
+    ]);
+
+    const after = readProject(projectDir);
+    const ids = after.assets.map((item) => item.id);
+    expect(ids).toContain(one.asset.id);
+    expect(ids).toContain(two.asset.id);
+    expect(one.asset.id).not.toBe(two.asset.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  }, 60_000);
+
+  maybe('updateProject:合并期间工程被从别处改了 → 复核发现后重来,不静默覆盖', async () => {
+    const projectDir = join(dir, 'project-update-retry');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    let calls = 0;
+    const merged = updateProject(projectDir, (current) => {
+      calls += 1;
+      // 第一次合并时,假装别人在「读出这份工程 → 写回」之间插了一手(改了种子)。
+      if (calls === 1) {
+        writeProject(projectDir, {
+          ...current,
+          revision: current.revision + 1,
+          parentHash: projectHash(current),
+          shots: current.shots.map((shot) => ({ ...shot, generation: { ...shot.generation, seed: 999 } })),
+        });
+      }
+      return {
+        ...current,
+        revision: current.revision + 1,
+        parentHash: projectHash(current),
+        shots: current.shots.map((shot) => ({ ...shot, generation: { ...shot.generation, prompt: '合并写的提示词' } })),
+      };
+    });
+
+    // 旧行为(读一次写一次):调一次就落盘,别处那次的改动静静地没了,也不会重来。
+    expect(calls).toBe(2);
+    // 别处的改动是被第二次合并读进来、写下去,不是被覆盖。
+    expect(merged.shots[0]!.generation.seed).toBe(999);
+    expect(merged.shots[0]!.generation.prompt).toBe('合并写的提示词');
+    const after = readProject(projectDir);
+    expect(after.shots[0]!.generation.seed).toBe(999);
+    expect(after.shots[0]!.generation.prompt).toBe('合并写的提示词');
+  }, 60_000);
+
+  maybe('updateProject:每次都被别处改掉 → 撞满就抛 PROJECT_BUSY,不无限重试', async () => {
+    const projectDir = join(dir, 'project-update-busy');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    writeFixture(projectDir, fixture.project);
+
+    let calls = 0;
+    const boom = (): string => {
+      try {
+        updateProject(projectDir, (current) => {
+          calls += 1;
+          writeProject(projectDir, {
+            ...current,
+            revision: current.revision + 1,
+            parentHash: projectHash(current),
+            shots: current.shots.map((shot) => ({ ...shot, generation: { ...shot.generation, seed: calls } })),
+          });
+          return { ...current, revision: current.revision + 1, parentHash: projectHash(current) };
+        });
+        return '没报错';
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    };
+
+    expect(boom()).toBe('PROJECT_BUSY');
+    // 有上限:撞这么多次就不是运气差,该让人看一眼,而不是转到天荒地老。
+    expect(calls).toBeGreaterThan(1);
+  }, 60_000);
+
+  maybe('面板「改工程」的默认示例当场能应用(不变量:用户点「应用改动」第一个跑的就是它)', async () => {
     const projectDir = join(dir, 'project-default-patch');
     const fixture = await makeFixture(projectDir, { clips: 1 });
     writeFixture(projectDir, fixture.project);

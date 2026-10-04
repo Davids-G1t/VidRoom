@@ -10,6 +10,8 @@ export type VidroomErrorCode =
   | 'PROJECT_INVALID'
   | 'PROJECT_NOT_FOUND'
   | 'PROJECT_HASH_MISMATCH'
+  /** 同一条工程在「读 → 改 → 写」之间被反复改写,乐观复核连撞多次(没有别的写者时不该出现)。 */
+  | 'PROJECT_BUSY'
   | 'PLAN_HASH_MISMATCH'
   | 'WORKFLOW_MISMATCH'
   /** 盘上权重与工程 `locks.models` 记的对不上(换了权重就是换了环境,结果不可比)。 */

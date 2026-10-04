@@ -2,7 +2,7 @@
 
 VidRoom 可以在你自己的电脑上用 MiniMax H3 生成视频。MiniMax H3 不属于 VidRoom,它按 **MiniMax H3 Community License Agreement** 授权。许可全文:[tag `legacy-app-final` 里的 `apps/web/public/licenses/MiniMax-H3-LICENSE.txt`](https://github.com/Davids-G1t/VidRoom/blob/legacy-app-final/apps/web/public/licenses/MiniMax-H3-LICENSE.txt)(旧独立 app 的副本已随 app 归档到该 tag;取自 https://huggingface.co/MiniMaxAI/MiniMax-H3 ,commit `42ed227ee7df40d41602854ae760620d6eb651fe`,sha256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`)。
 
-该许可第 V.2 条要求:向用户提供 MiniMax H3 之前,要让每位用户受到至少与第 V 节和附件 A 同等保护力度的约束,并告知用户这些限制适用。**使用 VidRoom 生成视频,即表示你同意遵守下面原样转达的第 V 节和附件 A。** 谁做「带模型下载的应用界面」,谁就得在下载前显示许可全文并取得同意 —— 这条是许可对下游分发方的要求,不是 VidRoom 自己的规定;本仓现在只有插件,自己不下载模型(模型要自己按 ComfyUI 的装法放好)。
+该许可第 V.2 条要求:向用户提供 MiniMax H3 之前,要让每位用户受到至少与第 V 节和附件 A 同等保护力度的约束,并告知用户这些限制适用。**使用 VidRoom 生成视频,即表示你同意遵守下面原样转达的第 V 节和附件 A。** 该许可第 V.2 条要求:把 MiniMax H3(或含它的产品/服务)提供给用户之前,要让每位用户受同等保护力度的条款约束,并告知他们这些限制适用。**使用 VidRoom 生成视频,即表示你同意遵守下面原样转达的第 V 节和附件 A。** 这条义务落在「把 H3 提供给用户」这件事上,不分是不是下载(拿带模型的应用、在线服务、代跑都算);本仓现在只有插件,自己不提供模型,模型要自己按 ComfyUI 的装法放好。
 
 中文要点(帮助理解,不替代原文,以英文原文为准):
 

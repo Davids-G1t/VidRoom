@@ -12,7 +12,7 @@ import { mediaTools } from './config.js';
 import { VidroomError } from './errors.js';
 import type { MediaTools, Probe } from './media.js';
 import { buildPlan, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, ensureDir, importAsset, nextId, projectFileOf, readProject, writeProject } from './project-io.js';
+import { applyPatch, ensureDir, importAsset, nextId, projectFileOf, readProject, resolveInside, writeProject } from './project-io.js';
 import {
   PROJECT_FILE,
   emptyProject,
@@ -101,11 +101,6 @@ export function inspectProject(dir: string, project: Project): ProjectView {
   };
 }
 
-/** 面板/工具都用一行文字看工程状态。 */
-export function projectSummary(project: Project): string {
-  const selected = project.shots.filter((shot) => shot.selectedCandidateId !== undefined).length;
-  return `工程 ${project.projectId} r${project.revision} · 哈希 ${projectHash(project).slice(0, 12)} · 镜头 ${project.shots.length}(已选定 ${selected})· 候选 ${project.candidates.length} · 资产 ${project.assets.length}`;
-}
 
 export function patchProject(
   dir: string,
@@ -228,20 +223,34 @@ export function listCandidates(
     .sort((left, right) => (left.id < right.id ? -1 : 1));
   const start = options.cursor === undefined ? 0 : all.findIndex((candidate) => candidate.id === options.cursor) + 1;
   const page = all.slice(start, start + limit);
-  const next = all[start + limit];
   return {
     total: all.length,
     items: page.map((candidate) => ({
       ...candidate,
       selected: project.shots.find((shot) => shot.id === candidate.shotId)?.selectedCandidateId === candidate.id,
     })),
-    ...(next === undefined ? {} : { nextCursor: next.id }),
+    // 游标是**本页最后一条**:下一页从它之后开始,翻页不漏项。
+    ...(page.length === 0 || start + page.length >= all.length ? {} : { nextCursor: page[page.length - 1]!.id }),
   };
 }
 
 export function assetView(dir: string, asset: Asset): Asset & { absolutePath: string; missing: boolean } {
   const absolutePath = resolve(dir, asset.path);
   return { ...asset, absolutePath, missing: !existsSync(absolutePath) };
+}
+
+/**
+ * 面板能回放的文件:这个工程**已登记**的资产,或 `runs/` 里的运行产物。
+ * 别的相对路径一律不给 —— `asset` 参数是调用方可控的,不限定就只能防住 `..`,
+ * 防不住拿 `path=<任意目录>&asset=passwd` 去读工程外的普通文件。
+ */
+export function replayablePath(dir: string, project: Project, relativePath: string): string {
+  const normalized = relativePath.split('\\').join('/').replace(/^\.\//, '');
+  const registered = new Set(project.assets.map((asset) => asset.path));
+  if (!registered.has(normalized) && !normalized.startsWith('runs/')) {
+    throw new VidroomError('PROJECT_INVALID', `不是这个工程的资产或运行产物,不给回放:${relativePath}`);
+  }
+  return resolveInside(dir, normalized, 'asset');
 }
 
 export function listAssets(
@@ -252,11 +261,13 @@ export function listAssets(
   const limit = options.limit === undefined ? 20 : Math.min(100, Math.max(1, Math.trunc(options.limit)));
   const start = options.cursor === undefined ? 0 : project.assets.findIndex((item) => item.id === options.cursor) + 1;
   const page = project.assets.slice(start, start + limit);
-  const next = project.assets[start + limit];
   return {
     total: project.assets.length,
     items: page.map((asset) => assetView(dir, asset)),
-    ...(next === undefined ? {} : { nextCursor: next.id }),
+    // 游标是**本页最后一条**,不是下一条(给下一条会让下一页从它之后开始,白丢一项)。
+    ...(page.length === 0 || start + page.length >= project.assets.length
+      ? {}
+      : { nextCursor: page[page.length - 1]!.id }),
   };
 }
 
@@ -533,6 +544,19 @@ export function alignSegment(
  * 回执
  * ------------------------------------------------------------------ */
 
+/** 同一工程同时只跑一条 run(设计页的 ALREADY_RUNNING)。 */
+const IN_FLIGHT = new Set<string>();
+
+/**
+ * 报出去的运行状态:回执里写着 `queued`/`running`、但**本进程手上没有这条 run** 的,
+ * 说明是上回进程中途挂了留下的 —— 按 `unknown`(待核)报,不冒充还在跑。
+ * 不自动重投:状态没核实就重跑,可能把已经出好的东西再跑一遍。
+ */
+function runStateOf(state: Receipt['state'], dir: string): Receipt['state'] {
+  if (state !== 'queued' && state !== 'running') return state;
+  return IN_FLIGHT.has(resolve(dir)) ? state : 'unknown';
+}
+
 export interface JobView {
   projectPath: string;
   runId?: string;
@@ -544,7 +568,10 @@ export interface JobView {
 export function jobView(dir: string, runId?: string, limit = 10): JobView {
   const store = new RunStore(dir);
   if (runId === undefined) {
-    const runs = store.list().slice(-Math.max(1, Math.trunc(limit))).reverse();
+    const runs = store.list().slice(0, Math.max(1, Math.trunc(limit))).map((run) => ({
+      ...run,
+      state: runStateOf(run.state, dir),
+    }));
     return {
       projectPath: dir,
       runs,
@@ -556,20 +583,21 @@ export function jobView(dir: string, runId?: string, limit = 10): JobView {
   }
   const receipt = store.read(runId);
   if (receipt === undefined) throw new VidroomError('RUN_NOT_FOUND', `这个工程里没有 run ${runId}`);
+  const state = runStateOf(receipt.state, dir);
   return {
     projectPath: dir,
     runId,
-    receipt,
+    receipt: { ...receipt, state },
     summary: [
-      `${receipt.runId}:${receipt.mode} / ${receipt.state}`,
+      `${receipt.runId}:${receipt.mode} / ${state}`,
+      ...(state === receipt.state
+        ? []
+        : ['这条 run 是上回留下的、现在不在跑(进程可能中途挂了);状态没核实前不自动重投']),
       `镜头 ${receipt.shots.length}(成 ${receipt.shots.filter((shot) => shot.state === 'succeeded').length})· 产物 ${receipt.outputs.length}`,
       receipt.error === undefined ? '无错误' : `错误:${receipt.code ?? ''} ${receipt.error}`,
     ].join('\n'),
   };
 }
-
-/** 同一工程同时只跑一条 run(设计页的 ALREADY_RUNNING)。 */
-const IN_FLIGHT = new Set<string>();
 
 export function markRunning(dir: string): () => void {
   const key = resolve(dir);

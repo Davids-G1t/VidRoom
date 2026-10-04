@@ -12,6 +12,8 @@ export type VidroomErrorCode =
   | 'PROJECT_HASH_MISMATCH'
   | 'PLAN_HASH_MISMATCH'
   | 'WORKFLOW_MISMATCH'
+  /** 盘上权重与工程 `locks.models` 记的对不上(换了权重就是换了环境,结果不可比)。 */
+  | 'MODEL_MISMATCH'
   | 'PATCH_REJECTED'
   | 'BUDGET_EXCEEDED'
   | 'LOCAL_ONLY'

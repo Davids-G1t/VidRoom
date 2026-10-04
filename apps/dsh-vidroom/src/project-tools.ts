@@ -188,7 +188,7 @@ export function registerVidroomProjectTools(ctx: HostContext, runtime: VidroomRu
       baseHash: BASE_HASH,
       patch: {
         type: 'array',
-        description: 'JSON Patch 操作:{op:"replace"|"add"|"remove", path:"/shots/0/edit/speed", value:…}。',
+        description: 'JSON Patch 操作:{op:"replace"|"add"|"remove", path:"shots[0].edit.speed", value:…}。',
         items: { type: 'object' },
       },
       projectId: { type: 'string', description: 'action=create 时的工程 id(不给自动生成)。' },

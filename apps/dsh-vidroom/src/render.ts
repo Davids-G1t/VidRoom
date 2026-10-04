@@ -7,16 +7,16 @@
  * ③ 生成完的素材**立刻取回本机并登记进工程**,不靠 ComfyUI 的内存历史复跑。
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { H3_WORKFLOW_ID, assertSupported, h3Run, h3WorkflowHash, type H3RunResult } from './adapter.js';
 import { alignmentIssues } from './align.js';
 import { composeFinal } from './compose.js';
 import { mediaTools } from './config.js';
-import { VidroomError, errorFacts } from './errors.js';
-import { toolVersion, type MediaTools } from './media.js';
+import { VidroomError, errorFacts, type VidroomErrorCode } from './errors.js';
+import { sha256File, toolVersion, type MediaTools } from './media.js';
 import { assertPlanHash, buildPlan, readReceipts, requestFor, type NewRequest, type Plan, type PlanTarget } from './plan.js';
-import { applyPatch, importAsset, nextId, resolveInside, writeProject } from './project-io.js';
+import { applyPatch, ensureDir, importAsset, nextId, writeProject } from './project-io.js';
 import { H3_FPS } from './frames.js';
 import { projectHash, type Budget, type Candidate, type PatchOp, type Project } from './project.js';
 import { RunStore, newRunId, type Receipt, type RunMode, type RunShot } from './receipts.js';
@@ -33,6 +33,8 @@ export interface RenderRequest {
   /** 变体运行为 false:新候选只进 run 快照,不回写工程。 */
   writeBack?: boolean;
   variantId?: string;
+  /** 冻结的校准输入:同批多条时由调用方一次性读了传进来,免得同批第一条跑完就把后面的 planHash 改了。 */
+  receipts?: Receipt[];
 }
 
 export interface RenderResult {
@@ -60,11 +62,88 @@ function sanitizeName(raw: string): string {
 }
 
 /** 候选请求 → ComfyUI 的一次提交 + 把产物取回本机(登记交给调用方,它才看得到工程现状)。 */
+/**
+ * 生成期间有人改过工程时的回写方式:只把我们这一跑新加的资产/候选并过去,
+ * 别人的 patch、别人导的素材、别人选定的候选都不动 —— 拿开工时那份整份覆盖会把它们抹掉。
+ */
+function mergeGenerated(current: Project, ran: Project, newCandidateIds: string[]): Project {
+  const assetIds = new Set(current.assets.map((asset) => asset.id));
+  const candidateIds = new Set(current.candidates.map((candidate) => candidate.id));
+  const mine = new Set(newCandidateIds);
+  const addedAssets = ran.assets.filter((asset) => !assetIds.has(asset.id));
+  const addedCandidates = ran.candidates.filter((candidate) => mine.has(candidate.id) && !candidateIds.has(candidate.id));
+  const byShot = new Map<string, string[]>();
+  for (const candidate of addedCandidates) {
+    const list = byShot.get(candidate.shotId) ?? [];
+    list.push(candidate.id);
+    byShot.set(candidate.shotId, list);
+  }
+  return {
+    ...current,
+    revision: current.revision + 1,
+    parentHash: projectHash(current),
+    assets: [...current.assets, ...addedAssets],
+    candidates: [...current.candidates, ...addedCandidates],
+    shots: current.shots.map((shot) => {
+      const add = byShot.get(shot.id);
+      if (add === undefined || add.length === 0) return shot;
+      return { ...shot, candidateIds: [...shot.candidateIds, ...add.filter((id) => !shot.candidateIds.includes(id))] };
+    }),
+  };
+}
+
+/**
+ * 工程锁里的权重是否与盘上一致。
+ * 大文件不会每次重算:按 `路径:大小:改动时间` 缓存哈希,权重没动就不重算(表存在工程的 runs/ 里)。
+ * 对不上就不跑 —— 换了权重等于换了环境,结果不可比。
+ */
+async function assertModelsLocked(project: Project, modelsRoot: string, store: RunStore): Promise<void> {
+  const models = project.locks?.models ?? [];
+  if (models.length === 0) return;
+  const cacheFile = join(store.runsDir(), '.model-hashes.json');
+  let cache: Record<string, string> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    if (parsed !== null && typeof parsed === 'object') cache = parsed as Record<string, string>;
+  } catch {
+    cache = {};
+  }
+  const mismatched: string[] = [];
+  let cacheChanged = false;
+  for (const model of models) {
+    const file = isAbsolute(model.file) ? model.file : join(modelsRoot, model.file);
+    if (!existsSync(file)) {
+      mismatched.push(`${model.file}(盘上没有)`);
+      continue;
+    }
+    const stat = statSync(file);
+    const key = `${file}:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+    let actual = cache[key];
+    if (actual === undefined) {
+      actual = await sha256File(file);
+      cache[key] = actual;
+      cacheChanged = true;
+    }
+    if (actual !== model.sha256) mismatched.push(`${model.file}(哈希对不上)`);
+  }
+  if (cacheChanged) {
+    ensureDir(store.runsDir());
+    writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`, 'utf8');
+  }
+  if (mismatched.length > 0) {
+    throw new VidroomError(
+      'MODEL_MISMATCH',
+      `工程锁的权重与盘上对不上:${mismatched.join('、')};换回原权重或重新 lock 再跑`,
+    );
+  }
+}
+
 async function generateShot(
   runtime: VidroomRuntime,
   request: NewRequest,
   runId: string,
   store: RunStore,
+  onQueued: (promptId: string) => void,
 ): Promise<{ localPath: string; filename: string; result: H3RunResult }> {
   const h3Request = {
     prompt: request.prompt,
@@ -79,7 +158,7 @@ async function generateShot(
   };
   // 参数域先校验:不合法的尺寸/帧数在提交前就报错,不会白占一次队列。
   assertSupported(h3Request);
-  const result = await h3Run(runtime, h3Request);
+  const result = await h3Run(runtime, h3Request, { onQueued });
   const media = result.media.find((item) => item.kind === 'video') ?? result.media[0];
   if (media === undefined) throw new VidroomError('RENDER_FAILED', `H3 跑完没给产物(promptId=${result.promptId})`);
   const downloadsDir = join(store.dirOf(runId), 'downloads');
@@ -120,6 +199,8 @@ export async function renderProject(
   const config = runtime.config();
   const tools = mediaTools(config);
   const store = new RunStore(request.dir);
+  // 先核权重锁:盘上权重与工程锁不一致就不开工(不是等跑完才怪结果不对)。
+  await assertModelsLocked(project, runtime.config().modelsRoot, store);
   const mode: RunMode = request.target === 'candidates' ? 'candidates' : 'final';
 
   // ① 哈希闸:对不上就什么都不做(连 plan 的成本都省了)。
@@ -144,19 +225,18 @@ export async function renderProject(
     dir: request.dir,
     target: request.target,
     ...(request.budget === undefined ? {} : { budget: request.budget }),
-    receipts: readReceipts(request.dir),
+    receipts: request.receipts ?? readReceipts(request.dir),
   });
   if (request.planHash === undefined) {
     throw new VidroomError('PLAN_HASH_MISMATCH', '渲染要带 planHash(先 vidroom_plan 拿一份),不带不跑');
   }
   assertPlanHash(plan, request.planHash);
   if (!plan.ready) {
-    const budgetProblem = plan.blockers.some((blocker) => blocker.includes('BUDGET_EXCEEDED'));
-    const alignmentProblem = plan.blockers.some((blocker) => blocker.includes('ALIGNMENT_REQUIRED'));
-    throw new VidroomError(
-      budgetProblem ? 'BUDGET_EXCEEDED' : alignmentProblem ? 'ALIGNMENT_REQUIRED' : 'RENDER_FAILED',
-      `计划还差东西,没开工:${plan.blockers.join('; ')}`,
-    );
+    // 分开写,不堆嵌套三元(可读性优先)。
+    let code: VidroomErrorCode = 'RENDER_FAILED';
+    if (plan.blockers.some((blocker) => blocker.includes('BUDGET_EXCEEDED'))) code = 'BUDGET_EXCEEDED';
+    else if (plan.blockers.some((blocker) => blocker.includes('ALIGNMENT_REQUIRED'))) code = 'ALIGNMENT_REQUIRED';
+    throw new VidroomError(code, `计划还差东西,没开工:${plan.blockers.join('; ')}`);
   }
 
   // ② 开 run:工程快照 + 计划 + 初始回执先落盘,之后再动 GPU。
@@ -213,8 +293,27 @@ async function runCandidates(
     );
     if (targets.length === 0) targets.push(...working.shots.filter((shot) => shot.id === request.shotId));
     const startedAt = Date.now();
+    // 提交那一刻就记:promptId + `submitted` 一条 + 提交计数。
+    // 计数放在这里而不是失败分支里的 “+1” —— 校验没过、queue 被拒都不算提交过。
+    let queuedPromptId: string | undefined;
+    const onQueued = (promptId: string): void => {
+      queuedPromptId = promptId;
+      shots.push({
+        shotId: request.shotId,
+        state: 'submitted',
+        promptId,
+        width: request.width,
+        height: request.height,
+        frames: request.frames,
+      });
+      receipt = store.update(runId, {
+        shots,
+        checks: { ...receipt.checks, comfySubmissions: receipt.checks.comfySubmissions + 1, h3Requests: receipt.checks.h3Requests + 1 },
+      });
+      store.log(runId, `已提交 promptId=${promptId}(镜头 ${request.shotId}),结果还没回来`);
+    };
     try {
-      const { localPath, result } = await generateShot(runtime, request, runId, store);
+      const { localPath, result } = await generateShot(runtime, request, runId, store, onQueued);
       const asset = await importAsset(store.projectDir, {
         sourcePath: localPath,
         kind: 'video',
@@ -246,6 +345,9 @@ async function runCandidates(
         working.candidates.push(full);
         target.candidateIds.push(id);
         newCandidateIds.push(id);
+        // 结果回来了:把刚才那条 `submitted` 换成真的结果,不留半截记录。
+        const pendingIndex = shots.findIndex((item) => item.state === 'submitted' && item.shotId === target.id);
+        if (pendingIndex >= 0) shots.splice(pendingIndex, 1);
         shots.push({
           shotId: target.id,
           state: 'succeeded',
@@ -260,29 +362,26 @@ async function runCandidates(
         });
       }
       const shared = targets.length > 1 ? `(同配方 ${targets.length} 条镜头共用)` : '';
-      receipt = store.update(runId, {
-        shots,
-        checks: { ...receipt.checks, comfySubmissions: receipt.checks.comfySubmissions + 1, h3Requests: receipt.checks.h3Requests + 1 },
-      });
+      receipt = store.update(runId, { shots });
       store.log(
         runId,
         `镜头 ${request.shotId} 出了候选 ${newCandidateIds.at(-1) ?? ''}(${request.width}x${request.height} · ${request.frames} 帧)${shared}`,
       );
     } catch (error) {
       const facts = errorFacts(error);
+      const pendingIndex = shots.findIndex((item) => item.state === 'submitted' && item.shotId === request.shotId);
+      if (pendingIndex >= 0) shots.splice(pendingIndex, 1);
       shots.push({
         shotId: request.shotId,
         state: 'failed',
+        ...(queuedPromptId === undefined ? {} : { promptId: queuedPromptId }),
         width: request.width,
         height: request.height,
         frames: request.frames,
         elapsedMs: Date.now() - startedAt,
         error: `${facts.code}:${facts.message}`,
       });
-      receipt = store.update(runId, {
-        shots,
-        checks: { ...receipt.checks, comfySubmissions: receipt.checks.comfySubmissions + 1, h3Requests: receipt.checks.h3Requests + 1 },
-      });
+      receipt = store.update(runId, { shots });
       store.log(runId, `镜头 ${request.shotId} 失败:${facts.code}:${facts.message}`);
     }
   }
@@ -404,6 +503,8 @@ export async function renderVariants(
     action: 'plan' | 'run';
     expectedProjectHash?: string;
     budget?: Partial<Budget>;
+    /** 同 #RenderRequest.receipts:整批共用一份校准输入。 */
+    receipts?: Receipt[];
   },
 ): Promise<VariantBatch> {
   const budget = { ...project.budget, ...request.budget };
@@ -434,6 +535,9 @@ export async function renderVariants(
   const batchId = `batch-${newRunId().slice(4)}`;
   const plans: VariantBatch['plans'] = [];
   const runs: VariantBatch['runs'] = [];
+  // 整批共用一份校准输入:计划哈希里含实测估值,如果每条变体自己去读最新回执,
+  // 同批第一条跑完就把后面几条的 planHash 改了 → 拿着 plan 阶段那份哈希真跑时会被拒。
+  const frozenReceipts = request.receipts ?? readReceipts(request.dir);
 
   for (const variant of request.variants) {
     let variantProject: Project;
@@ -453,7 +557,7 @@ export async function renderVariants(
           dir: request.dir,
           target: request.target,
           budget,
-          receipts: readReceipts(request.dir),
+          receipts: frozenReceipts,
         });
         plans.push({
           variantId: variant.id,
@@ -477,6 +581,7 @@ export async function renderVariants(
         budget,
         writeBack: false,
         variantId: variant.id,
+        receipts: frozenReceipts,
       });
       runs.push({
         variantId: variant.id,
@@ -498,17 +603,4 @@ export async function renderVariants(
     runs,
     failures: runs.filter((run) => run.status === 'failed').length,
   };
-}
-
-/** 一个工程用到的资产文件是否都在(面板/工具报缺件用)。 */
-export function missingAssets(project: Project, dir: string): string[] {
-  const missing: string[] = [];
-  for (const asset of project.assets) {
-    try {
-      if (!existsSync(resolveInside(dir, asset.path, `资产 ${asset.id} 的路径`))) missing.push(asset.id);
-    } catch {
-      missing.push(asset.id);
-    }
-  }
-  return missing;
 }

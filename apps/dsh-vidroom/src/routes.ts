@@ -22,9 +22,10 @@ import {
   planProject,
   projectDirOf,
   registerReference,
+  replayablePath,
   startRender,
 } from './project-ops.js';
-import { readProject, resolveInside } from './project-io.js';
+import { readProject } from './project-io.js';
 import { VidroomError, errorFacts } from './errors.js';
 import { renderVariants, type VariantSpec } from './render.js';
 import type { Budget, PatchOp } from './project.js';
@@ -174,21 +175,15 @@ const MEDIA_TYPES: Record<string, string> = {
 };
 
 /**
- * 面板回放工程里的素材与成片:只认工程根子树里的相对路径(`resolveInside` 挡 `..`/符号链接/绝对路径),
- * 只读 GET,不回写。带 Range 支持,<video> 才能拖进度。
+ * 面板回放工程里的素材与成片:文件得**先认出是这个工程的资产或运行产物**
+ * (`replayablePath`),再看工程根子树里的相对路径规则。只读 GET,不回写。带 Range 支持,<video> 才能拖进度。
  */
-export function serveProjectFile(
-  request: IncomingMessage,
-  response: ServerResponse,
-  dir: string,
-  relativePath: string,
-): void {
+export function serveProjectFile(request: IncomingMessage, response: ServerResponse, file: string): void {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     response.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
     response.end(JSON.stringify({ ok: false, error: '只支持 GET' }));
     return;
   }
-  const file = resolveInside(dir, relativePath, 'asset');
   const size = statSync(file).size;
   const headers = {
     'Cache-Control': 'no-store',
@@ -483,11 +478,12 @@ function projectHandlers(
       (request, response, url) => {
         void guarded(response, () => {
           const dir = projectDirOf(readPath(url));
+          const project = readProject(dir);
           const relative = url.searchParams.get('asset') ?? url.searchParams.get('file');
           if (relative === null || relative.trim() === '') {
             throw new VidroomError('PROJECT_INVALID', '要给 asset(工程内的相对路径)');
           }
-          serveProjectFile(request, response, dir, relative.trim());
+          serveProjectFile(request, response, replayablePath(dir, project, relative.trim()));
         });
       },
     ],

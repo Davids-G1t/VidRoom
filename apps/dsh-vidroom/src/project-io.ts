@@ -7,7 +7,7 @@
  * patch 都直接拒掉 —— 不接受任意代码 patch。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 import { VidroomError } from './errors.js';
 import { probeMedia, sha256File, type MediaTools, type Probe } from './media.js';
@@ -48,9 +48,11 @@ export function readProject(dir: string): Project {
 /** 写工程(先写临时文件再 rename,避免半截文件)。 */
 export function writeProject(dir: string, project: Project): string {
   ensureDir(dir);
+  // 写之前先验:回写、夹具、测试都不能绕过 schema(不然“验过的工程”就只是口头保证)。
+  const validated = validateProject(project);
   const file = projectFileOf(dir);
   const temp = `${file}.tmp-${process.pid}`;
-  writeFileSync(temp, `${JSON.stringify(project, null, 2)}\n`, 'utf8');
+  writeFileSync(temp, `${JSON.stringify(validated, null, 2)}\n`, 'utf8');
   renameSync(temp, file);
   return file;
 }
@@ -71,6 +73,15 @@ export function resolveInside(dir: string, relativePath: string, what = 'path'):
     throw new VidroomError('PROJECT_INVALID', `${what} 经符号链接越出工程根:${relativePath}`);
   }
   return real;
+}
+
+/** 写之前核目标实路径没越出工程根(目录/文件本身可能是越界符号链)。 */
+function assertInsideRoot(dir: string, target: string, what: string): void {
+  const root = realpathSync(resolve(dir));
+  const real = realpathSync(target);
+  if (real !== root && !real.startsWith(`${root}${sep}`)) {
+    throw new VidroomError('PROJECT_INVALID', `${what} 经符号链接越出工程根:${target}`);
+  }
 }
 
 /** 下一个可用 id:`asset-1`、`shot-2` 这种,稳定且唯一。 */
@@ -102,12 +113,34 @@ export async function importAsset(dir: string, options: ImportOptions): Promise<
   if (!statSync(source).isFile()) {
     throw new VidroomError('PROJECT_INVALID', `要导入的不是普通文件:${options.sourcePath}`);
   }
-  const id = nextId(options.kind === 'font' ? 'font' : 'asset', options.existingIds);
+  const prefix = options.kind === 'font' ? 'font' : 'asset';
   const suffix = extname(source).toLowerCase();
-  const relativePath = `assets/${id}${suffix}`;
-  const target = join(dir, relativePath);
-  ensureDir(join(dir, 'assets'));
-  copyFileSync(source, target);
+  const assetsDir = join(dir, 'assets');
+  ensureDir(assetsDir);
+  // 写之前先核:`assets/` 不能是越界符号链,目标位置不能是符号链(不然 copyFileSync 会顺着它写到工程外)。
+  assertInsideRoot(dir, assetsDir, '资产目录');
+
+  // 排一个真没人占的路径:光看工程里的 id 不够 —— 变体各自从同一份快照起跑,
+  // 会算出同一个 `asset-N` 然后把别人刚生成的素材覆盖掉。所以用 O_EXCL 占位,撞了就换下一个 id。
+  const taken = new Set<string>(options.existingIds);
+  let id = '';
+  let relativePath = '';
+  let target = '';
+  for (;;) {
+    id = nextId(prefix, taken);
+    relativePath = `assets/${id}${suffix}`;
+    target = join(dir, relativePath);
+    if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+      throw new VidroomError('PROJECT_INVALID', `资产位置是符号链接,不顺着它写:${relativePath}`);
+    }
+    try {
+      copyFileSync(source, target, constants.COPYFILE_EXCL);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      taken.add(id);
+    }
+  }
   const sha256 = await sha256File(target);
   const probe: Probe | undefined =
     options.kind === 'video' || options.kind === 'audio'
@@ -128,19 +161,23 @@ export async function importAsset(dir: string, options: ImportOptions): Promise<
  * 白名单 patch
  * ------------------------------------------------------------------ */
 
-/** 能改的地方:文案、提示词、seed、显式候选、样式、锚/字幕/特效、参考分析校订、音轨。 */
+/** 能改/能补的地方:文案、提示词与生成参数、显式候选、edit、样式、锚/字幕/特效、参考分析校订、音轨、预算、时钟与镜头。 */
 const PATCHABLE: RegExp[] = [
   /^script(\.[\w-]+|\[[^\]]+\])*$/,
   /^audio(\.[\w-]+|\[[^\]]+\])*$/,
   /^analysis(\.[\w-]+|\[[^\]]+\])*$/,
   /^reference\.analysisStatus$/,
-  /^shots\[[^\]]+\]\.generation\.(prompt|seed)$/,
+  /^shots\[[^\]]+\]\.generation\.(prompt|seed|requestedSeconds|width|height|fps|steps|sampler|scheduler|model)$/,
   /^shots\[[^\]]+\]\.selectedCandidateId$/,
   /^shots\[[^\]]+\]\.edit(\.[\w-]+)?$/,
   /^styles(\[[^\]]+\](\.[\w-]+)?)?$/,
   /^captions(\[[^\]]+\])?$/,
   /^effects(\[[^\]]+\])?$/,
   /^anchors(\[[^\]]+\])?$/,
+  /^budget(\.[\w-]+)?$/,
+  // 两个建的口子:补镜头、定合成时钟(新建/登记参考后的 `shots: []` 靠它补)。
+  /^shots$/,
+  /^timeline$/,
 ];
 
 const FORBIDDEN_SEGMENT = new Set(['__proto__', 'prototype', 'constructor']);
@@ -204,10 +241,27 @@ export function applyPatch(project: Project, patch: PatchOp[], options: { seedBy
     if (!PATCHABLE.some((pattern) => pattern.test(op.path))) {
       throw new VidroomError(
         'PATCH_REJECTED',
-        `不许改 ${op.path};能改的只有文案、prompt、seed、显式候选、样式、锚/字幕/特效、参考分析校订与音轨`,
+        `不许改 ${op.path};能改的只有文案、prompt/种子/尺寸/帧数/采样、显式候选、edit、样式、锚/字幕/特效、参考分析校订、音轨与预算;新增镜头用 add + shots,定合成时钟用 timeline`,
       );
     }
     const segments = splitPath(op.path, 'patch');
+    // 两个「建」入口:补镜头(`add` + `shots`)与定合成时钟(`add`/`replace` + `timeline`)。
+    // 没有它们,新建或登记参考后的工程 `shots: []` 永远补不上,只能用手改 JSON —— 那样工具面就不闭环。
+    if (segments.length === 1) {
+      if (op.path === 'shots' && op.op === 'add') {
+        const shots = (next.shots as unknown[] | undefined) ?? [];
+        if (Array.isArray(op.value)) shots.push(...op.value);
+        else shots.push(op.value);
+        next.shots = shots;
+        changedPaths.push(op.path);
+        continue;
+      }
+      if (op.path === 'timeline') {
+        next.timeline = op.value;
+        changedPaths.push(op.path);
+        continue;
+      }
+    }
     let cursor: unknown = next;
     for (const segment of segments.slice(0, -1)) {
       const { parent, key } = locate(cursor, segment, 'patch');
@@ -235,6 +289,28 @@ export function applyPatch(project: Project, patch: PatchOp[], options: { seedBy
 
   next.revision = project.revision + 1;
   next.parentHash = projectHash(project);
+
+  // 删/改词之后还有东西引着旧词(片段、锚点):不静默拆引用、也不让 schema 报一个读不懂的错 ——
+  // 直接回 ALIGNMENT_REQUIRED,告诉调用方把引用一起改掉(设计页:改词要重校订)。
+  const staged = next as unknown as Project;
+  const remainingTokens = new Set((staged.script?.tokens ?? []).map((token) => token.id));
+  const danglingRefs: string[] = [];
+  for (const anchor of staged.anchors as Project['anchors']) {
+    if (anchor.kind === 'word' && !remainingTokens.has(anchor.tokenId)) {
+      danglingRefs.push(`锚点 ${anchor.id} → 词 ${anchor.tokenId}`);
+    }
+  }
+  for (const segment of (staged.script?.segments ?? []) as Array<{ id: string; tokenIds: string[] }>) {
+    for (const tokenId of segment.tokenIds) {
+      if (!remainingTokens.has(tokenId)) danglingRefs.push(`段 ${segment.id} → 词 ${tokenId}`);
+    }
+  }
+  if (danglingRefs.length > 0) {
+    throw new VidroomError(
+      'ALIGNMENT_REQUIRED',
+      `这些引用还指着已删/已换的词:${danglingRefs.join('、')};改词请把段、锚点、字幕一起改(对齐要重校订)`,
+    );
+  }
 
   const stamped = validateProject(next);
   const invalidatedShotIds = computeInvalidatedShots(project, stamped, changedPaths);
@@ -274,14 +350,3 @@ function computeInvalidatedShots(before: Project, after: Project, changedPaths: 
   return [...invalidated];
 }
 
-/** 给回执与面板用的一行工程摘要。 */
-export function projectSummary(project: Project): string {
-  const selected = project.shots.filter((shot) => shot.selectedCandidateId !== undefined).length;
-  return [
-    `revision ${project.revision}`,
-    `镜头 ${project.shots.length}(已选定 ${selected})`,
-    `候选 ${project.candidates.length}`,
-    `资产 ${project.assets.length}`,
-    `哈希 ${projectHash(project).slice(0, 12)}`,
-  ].join(' · ');
-}

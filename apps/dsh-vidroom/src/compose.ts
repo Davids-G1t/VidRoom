@@ -11,7 +11,7 @@
 
 import { chmodSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { compileTimelineEvents, type CompiledCaption, type CompiledEffect } from './align.js';
+import { alignmentFacts, compileTimelineEvents, type CompiledCaption, type CompiledEffect } from './align.js';
 import { VidroomError } from './errors.js';
 import { probeMedia, runFfmpeg, sha256File, type MediaTools, type Probe } from './media.js';
 import type { Project, Shot, Style, Timeline } from './project.js';
@@ -344,25 +344,41 @@ function segmentsOf(project: Project, dir: string, timeline: Timeline): Segment[
   return segments;
 }
 
-/** 本地音轨模式:靠对齐找到这个段自己的录音,再把路径落在工程目录里。 */
+/**
+ * 本地音轨模式:靠对齐找到这个段自己的录音,再把路径落在工程目录里。
+ *
+ * 关键在这里**再核一遍对齐现值** —— 面板/工具查出的 `alignmentIssues` 只是操作时的提示,
+ * 改文案、改裁切、换音轨之后旧词窗就作废了;合成真用录音时重新核,不拿开工时那份判断当真。
+ */
 function localAudioPathOf(project: Project, dir: string, shot: Shot): string | undefined {
   const audio = project.audio;
   if (audio === undefined || audio.mode !== 'local' || audio.assetIds.length === 0) return undefined;
   const segmentId = shot.segmentId;
-  const alignment = project.alignments.find(
-    (item) => item.segmentId === segmentId && audio.assetIds.includes(item.assetId),
-  );
-  if (alignment === undefined) {
+  if (segmentId === undefined) {
     throw new VidroomError(
       'ALIGNMENT_REQUIRED',
-      `镜头 ${shot.id} 在本地音轨模式,但没有找到这个段的录音对齐(段 ${segmentId ?? '未标'});先 vidroom_align_words 再把音轨合进来`,
+      `镜头 ${shot.id} 在本地音轨模式,但没标段(segmentId),配不上录音;先标段并做词对齐`,
+    );
+  }
+  const alignment = project.alignments.find((item) => item.segmentId === segmentId);
+  if (alignment === undefined || !audio.assetIds.includes(alignment.assetId)) {
+    throw new VidroomError(
+      'ALIGNMENT_REQUIRED',
+      `镜头 ${shot.id} 在本地音轨模式,但没有找到这个段的录音对齐(段 ${segmentId});先 vidroom_align_words 再把音轨合进来`,
+    );
+  }
+  const facts = alignmentFacts(project, segmentId);
+  if (facts.status !== 'ok') {
+    throw new VidroomError(
+      'ALIGNMENT_REQUIRED',
+      `镜头 ${shot.id} 的录音对齐已失效(${facts.reason ?? '未知原因'}),先重新 vidroom_align_words 再合成`,
     );
   }
   const asset = project.assets.find((item) => item.id === alignment.assetId);
   if (asset === undefined) {
     throw new VidroomError('PROJECT_INVALID', `对齐引用的资产 ${alignment.assetId} 不在工程里`);
   }
-  return resolveInside(dir, asset.path, `段 ${segmentId ?? shot.id} 的独立录音`);
+  return resolveInside(dir, asset.path, `段 ${segmentId} 的独立录音`);
 }
 
 function captionFilter(

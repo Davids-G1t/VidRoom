@@ -12,19 +12,21 @@
  * 就 queue,上面那两组「提交数 = 0」的断言就会红。
  */
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createVidroomRuntime } from '../src/runtime.js';
+import { apply } from '../src/index.js';
 import { framesForSeconds } from '../src/frames.js';
 import { mountVidroomRoutes } from '../src/routes.js';
 import { probeMedia } from '../src/media.js';
 import { buildComposeCommand } from '../src/compose.js';
 import { readProject, importAsset } from '../src/project-io.js';
-import { planProject, startRender, listCandidates, jobView, alignSegment, registerReference } from '../src/project-ops.js';
-import { projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
+import { planProject, patchProject, startRender, listCandidates, listAssets, jobView, alignSegment, registerReference } from '../src/project-ops.js';
+import { emptyProject, projectHash, recipeHashOf, type PatchOp, type Project } from '../src/project.js';
+import { assertSupported, h3Capabilities } from '../src/adapter.js';
 import { startFakeComfy } from './support/fake-comfy.js';
 import { startTestWebServer } from './support/fake-web-server.js';
 import { TOOLS, hasFfmpeg, makeClip, makeFixture, writeFixture } from './support/batch2.js';
@@ -119,33 +121,48 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
       expect(asset?.sha256).toMatch(/^[0-9a-f]{64}$/);
       expect(existsSync(join(projectDir, asset?.path ?? 'nope'))).toBe(true);
 
-      // ② 参考片只给分析草稿,不给时间轴:人工把第一条镜头写进工程,再让 plan 算账。
-      const seeded = readProject(projectDir);
-      seeded.shots.push({
-        id: 'shot-1',
-        order: 0,
-        generation: {
-          model: 'MiniMax-H3',
-          prompt: '参考复刻:开头特写',
-          seed: 7,
-          requestedSeconds: 5,
-          width: 384,
-          height: 256,
-          fps: { num: 24, den: 1 },
-        },
-        candidateIds: [],
-        edit: { inFrame: 0, outFrame: framesForSeconds(5), speed: { num: 1, den: 1 }, audio: 'keep' },
+      // ② 参考片只给分析草稿,不给时间轴:通过工具的 patch 入口把镜头与合成时钟写进工程。
+      // 这里故意不直接写文件 —— 直接写就证明不了「工具面能建工程」(那是本轮审查抓的 P1)。
+      const added = patchProject(projectDir, stored, {
+        baseHash: projectHash(stored),
+        patch: [
+          {
+            op: 'add',
+            path: 'shots',
+            value: {
+              id: 'shot-1',
+              order: 0,
+              generation: {
+                model: 'MiniMax-H3',
+                prompt: '参考复刻:开头特写',
+                seed: 7,
+                requestedSeconds: 5,
+                width: 384,
+                height: 256,
+                fps: { num: 24, den: 1 },
+              },
+              candidateIds: [],
+              edit: { inFrame: 0, outFrame: framesForSeconds(5), speed: { num: 1, den: 1 }, audio: 'keep' },
+            },
+          },
+          {
+            op: 'add',
+            path: 'timeline',
+            value: {
+              fps: { num: 24, den: 1 },
+              width: 384,
+              height: 256,
+              placements: [{ shotId: 'shot-1', startFrame: 0, durationFrames: framesForSeconds(5) }],
+              totalFrames: framesForSeconds(5),
+            },
+          },
+        ],
       });
-      // 选之前也要是合法工程:时间轴按镜头自身时长排(首版:一个镜头一处、连续无重叠)。
-      seeded.timeline = {
-        fps: { num: 24, den: 1 },
-        width: 384,
-        height: 256,
-        placements: [{ shotId: 'shot-1', startFrame: 0, durationFrames: framesForSeconds(5) }],
-        totalFrames: framesForSeconds(5),
-      };
-      seeded.revision += 1;
-      writeFixture(projectDir, seeded);
+      expect(added.changedPaths).toContain('shots');
+      expect(added.changedPaths).toContain('timeline');
+      const seeded = readProject(projectDir);
+      expect(seeded.shots.map((shot) => shot.id)).toEqual(['shot-1']);
+      expect(seeded.timeline?.totalFrames).toBe(framesForSeconds(5));
 
       // ③ plan:只读依赖,一条 ComfyUI 请求都不发。
       const beforePlan = comfy.submissions.length;
@@ -438,6 +455,21 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
         expect(frozen.shots.length).toBe(fixture.project.shots.length);
         expect(existsSync(join(runDir, 'compose.sh'))).toBe(true);
       }
+      // 变体各跑各的:同一相对路径的资产, sha256 必须一致
+      // (旧行为失败点:两个变体算出同一个 `asset-N`,后者把前者的文件覆盖掉 —— 快照里的哈希就对不上了)。
+      const byPath = new Map<string, Set<string>>();
+      for (const item of ok) {
+        const frozen = readProject(join(projectDir, 'runs', item.runId ?? ''));
+        for (const asset of frozen.assets) {
+          const shas = byPath.get(asset.path) ?? new Set<string>();
+          shas.add(asset.sha256);
+          byPath.set(asset.path, shas);
+        }
+      }
+      for (const [path, shas] of byPath) {
+        expect(shas.size, `${path} 被两个变体写成了不同内容`).toBe(1);
+        expect(existsSync(join(projectDir, path))).toBe(true);
+      }
       // 没被改到的素材 sha256 保持(变体只进 run 快照,不回写工程)。
       expect(readProject(projectDir).revision).toBe(fixture.project.revision);
       for (const [id, sha] of originalAssets) {
@@ -586,7 +618,18 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
     const again = readProject(projectDir);
     expect(again.alignments[0]?.words[0]).toEqual({ tokenId: 'tk-1', startFrame: 0, endFrame: 6 });
 
-    // 删掉被锚定的词 → 明确失败(不许拿旧时间窗顶)。
+    // 删掉被锚定的词 → 当场 ALIGNMENT_REQUIRED(不静默拆锚、也不拿旧时间窗顶;验收 2)。
+    const removalCode = ((): string | null => {
+      try {
+        patchProject(projectDir, again, { patch: [{ op: 'remove', path: 'script.tokens[tk-2]' }] });
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+    expect(removalCode).toBe('ALIGNMENT_REQUIRED');
+
+    // 硬造一份「锚点指着已删的词」的工程也不许落盘(schema 这一层兜底)。
     const withAnchor: Project = {
       ...afterEdit,
       anchors: [{ id: 'anc-1', kind: 'word', tokenId: 'tk-2', edge: 'start', offsetFrames: 0 }],
@@ -596,11 +639,7 @@ describe('第 2 批闭环(假 ComfyUI + 真 ffmpeg)', () => {
         segments: [{ ...afterEdit.script!.segments[0]!, tokenIds: ['tk-1', 'tk-3', 'tk-4', 'tk-5'] }],
       },
     };
-    writeFixture(projectDir, withAnchor);
-    // 删掉被锚定的词 → 计划明确不 ready(不许拿旧时间窗顶)。
-    const blockedPlan = await planProject(projectDir, withAnchor, 'final');
-    expect(blockedPlan.ready).toBe(false);
-    expect(blockedPlan.blockers.join('; ')).toMatch(/ALIGNMENT_REQUIRED/);
+    expect(() => writeFixture(projectDir, withAnchor)).toThrow(/没有这个词|ALIGNMENT/);
   }, 60_000);
 });
 
@@ -829,5 +868,241 @@ describe('本地音轨(audio.mode)', () => {
     });
     expect(command.argv.join(' ')).toContain('anullsrc');
     expect(command.inputs).toHaveLength(1);
+  }, 60_000);
+});
+
+/**
+ * 第 2 批的本地边界:工程内容不进云端对话 —— 聊天侧那批工程工具**默认不注册**。
+ *
+ * 反向验证:把 `src/index.ts` 里的 `config.chatTools ?` 去掉(回到无条件注册),
+ * 第一条断言就会红(默认配置下 `vidroom_project` 又冒出来了)。
+ */
+describe('工程工具的注册闸', () => {
+  function chatHost(): { ctx: Parameters<typeof apply>[0]; names: () => string[] } {
+    const names: string[] = [];
+    const ctx = {
+      tools: {
+        register(definition: unknown) {
+          const name = String((definition as { name?: unknown }).name);
+          names.push(name);
+          return () => {
+            const at = names.indexOf(name);
+            if (at >= 0) names.splice(at, 1);
+          };
+        },
+      },
+      get: () => undefined,
+      effect: (callback: () => unknown) => {
+        callback();
+      },
+      // 面板路由那条 inject 在本测试里不接线(只测工具注册闸)。
+      inject: () => {},
+    };
+    return { ctx, names };
+  }
+
+  it('默认不把工程工具塞进聊天,只留第 1 批的两个', () => {
+    const { ctx, names } = chatHost();
+    apply(ctx, {});
+    expect(names).toEqual(['vidroom_generate', 'vidroom_workflows']);
+  });
+
+  it('chatTools: true 才注册工程面(宿主聊天模型在本机跑时才准开)', () => {
+    const { ctx, names } = chatHost();
+    apply(ctx, { chatTools: true });
+    expect(names).toContain('vidroom_project');
+    expect(names).toContain('vidroom_align_words');
+    expect(names).toContain('vidroom_render');
+  });
+});
+
+/**
+ * 第二轮审查抓出来的边界。每条都是**旧行为会红**的:改回旧写法这些断言就挂。
+ */
+describe('第二轮审查边界(旧行为会失败的那些)', () => {
+  it('资产游标:翻页不漏项(旧行为:游标给「下一条」,每页白丢一项)', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-cursor-'));
+    const project: Project = emptyProject('cursor');
+    for (let index = 1; index <= 5; index += 1) {
+      project.assets.push({
+        id: `asset-${index}`,
+        kind: 'video',
+        path: `assets/asset-${index}.mp4`,
+        sha256: 'a'.repeat(64),
+        origin: 'local',
+      });
+    }
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const listed = listAssets(projectDir, project, { limit: 2, cursor });
+      seen.push(...listed.items.map((item) => item.id));
+      cursor = listed.nextCursor;
+      if (cursor === undefined) break;
+    }
+
+    expect(seen).toEqual(['asset-1', 'asset-2', 'asset-3', 'asset-4', 'asset-5']);
+  });
+
+  it('回执停在 running 但本进程没在跑 → 报 unknown(待核),不冒充在跑、不自动重投', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-stale-run-'));
+    const runDir = join(projectDir, 'runs', 'run-stale');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, 'receipt.json'),
+      `${JSON.stringify(
+        {
+          runId: 'run-stale',
+          projectPath: projectDir,
+          projectHash: 'a'.repeat(64),
+          planHash: 'b'.repeat(64),
+          target: 'final',
+          mode: 'final',
+          state: 'running',
+          startedAt: '2026-10-04T00:00:00.000Z',
+          shots: [],
+          outputs: [],
+          checks: { projectHashOk: true, planHashOk: true, comfySubmissions: 0, h3Requests: 0, reusedCandidates: 0 },
+          logs: [],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+
+    const list = jobView(projectDir);
+    expect(list.runs?.[0]?.state).toBe('unknown');
+    const single = jobView(projectDir, 'run-stale');
+    expect(single.receipt?.state).toBe('unknown');
+    // 提示里要说清楚是「上回留下的」,并且明说不自动重投。
+    expect(single.summary).toContain('不自动重投');
+  });
+
+  it('工程锁的权重和盘上对不上 → 开工前就拒(旧行为:静默按新权重跑,结果不可比)', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-lock-'));
+    const project: Project = {
+      ...emptyProject('lock'),
+      locks: {
+        adapterVersion: '0.1.0',
+        models: [{ file: '不存在的权重.safetensors', sha256: 'c'.repeat(64) }],
+        fontAssetIds: [],
+        deferred: [],
+      },
+    };
+    writeFixture(projectDir, project);
+
+    const runtime = createVidroomRuntime({
+      baseUrl: 'http://127.0.0.1:1',
+      timeoutMs: 30_000,
+      pollIntervalMs: 10,
+      allowExperimental: true,
+      ffmpegPath: TOOLS.ffmpegPath,
+      ffprobePath: TOOLS.ffprobePath,
+      modelsRoot: join(projectDir, 'models'),
+    });
+
+    const refused = await startRender(runtime, { dir: projectDir, mode: 'compose', planHash: 'd'.repeat(64) }).catch(
+      (error: unknown) => error,
+    );
+    expect(errorCode(refused)).toBe('MODEL_MISMATCH');
+  });
+
+  it('能力接口给的默认参数自己能过校验(旧行为:默认 121 帧被 17k+5 网格当场拒)', () => {
+    const capabilities = h3Capabilities({
+      reachable: true,
+      admissionAllowed: true,
+      admissionReason: '',
+      locks: { adapterVersion: '0.1.0', models: [{ file: 'm.safetensors', sha256: 'e'.repeat(64) }], fontAssetIds: [], deferred: [] },
+    });
+    expect(() =>
+      assertSupported({
+        prompt: '默认参数该能直接提交',
+        width: capabilities.defaults.width,
+        height: capabilities.defaults.height,
+        frames: capabilities.defaults.frames,
+      }),
+    ).not.toThrow();
+  });
+
+  maybe('改完文案再合成 → 对齐作废,当场拒(旧行为:拿旧词窗硬合,字幕和画面错位)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-vidroom-stale-align-'));
+    const projectDir = join(root, 'project');
+    const fixture = await makeFixture(projectDir, { clips: 1 });
+    const project = fixture.project;
+
+    const wav = join(root, 'vo.wav');
+    await run('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le', wav]);
+    const audioAsset = await importAsset(projectDir, {
+      sourcePath: wav,
+      kind: 'audio',
+      origin: 'local',
+      existingIds: project.assets.map((item) => item.id),
+      tools: TOOLS,
+    });
+    project.assets.push(audioAsset);
+
+    const tokens = [
+      { id: 'tk-1', segmentId: 'seg-1', speech: '开场', display: '开场', charRange: [0, 2] as [number, number] },
+      { id: 'tk-2', segmentId: 'seg-1', speech: '一句话', display: '一句话', charRange: [2, 5] as [number, number] },
+    ];
+    const { scriptHash } = await import('../src/project.js');
+    const voiced: Project = {
+      ...project,
+      script: {
+        language: 'zh',
+        segments: [{ id: 'seg-1', role: 'hook', text: '开场一句话。', tokenIds: tokens.map((token) => token.id) }],
+        tokens,
+      },
+      alignments: [],
+      shots: project.shots.map((shot) => ({ ...shot, segmentId: 'seg-1' })),
+    };
+    alignSegment(projectDir, voiced, {
+      segmentId: 'seg-1',
+      assetId: audioAsset.id,
+      audioHash: audioAsset.sha256,
+      scriptHash: scriptHash(voiced.script),
+      wordWindows: [
+        { tokenId: 'tk-1', startFrame: 0, endFrame: 8 },
+        { tokenId: 'tk-2', startFrame: 8, endFrame: 20 },
+      ],
+    });
+
+    // 文案改了(没重跑对齐):词窗是对着旧文案算的。
+    const aligned = readProject(projectDir);
+    const stale: Project = {
+      ...aligned,
+      script: {
+        ...aligned.script!,
+        segments: aligned.script!.segments.map((segment) => ({ ...segment, text: `${segment.text}又加了一句。` })),
+      },
+    };
+    writeFixture(projectDir, stale);
+
+    const refused = ((): unknown => {
+      try {
+        buildComposeCommand(stale, {
+          dir: projectDir,
+          runId: 'run-stale',
+          outPath: join(projectDir, 'runs', 'run-stale', 'final.mp4'),
+          tools: TOOLS,
+        });
+        return undefined;
+      } catch (error: unknown) {
+        return error;
+      }
+    })();
+    expect(errorCode(refused)).toBe('ALIGNMENT_REQUIRED');
+
+    // 对照:文案没改时能正常出命令(证明上面拦的是「作废」而不是「本地音轨一律拦」)。
+    expect(() =>
+      buildComposeCommand(aligned, {
+        dir: projectDir,
+        runId: 'run-ok',
+        outPath: join(projectDir, 'runs', 'run-ok', 'final.mp4'),
+        tools: TOOLS,
+      }),
+    ).not.toThrow();
   }, 60_000);
 });

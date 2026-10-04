@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { importAsset } from '../../src/project-io.js';
+import { importAsset, writeProject } from '../../src/project-io.js';
 import {
   H3_MODEL,
   OUTPUT_METADATA,
@@ -175,7 +175,8 @@ export async function makeFixture(
 /** 把工程写进 `project.vr.json`(测试里当「人工标注的工程」用)。 */
 export function writeFixture(dir: string, project: Project): void {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'project.vr.json'), `${JSON.stringify(project, null, 2)}\n`, 'utf8');
+  // 夹具也走校验过的写入口:夹具能绕 schema 的话,测试就证不了工程合法性。
+  writeProject(dir, project);
 }
 
 /** 一个候选/资产的配方哈希(测试里核去重用)。 */

@@ -14,6 +14,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { alignmentFacts, anchorFrame, compileTimelineEvents } from './align.js';
+import { h3WorkflowHash } from './adapter.js';
 import { VidroomError } from './errors.js';
 import { H3_FPS, framesForSeconds } from './frames.js';
 import { sha256File, type Fps, type MediaTools } from './media.js';
@@ -113,26 +114,34 @@ export function readReceipts(dir: string): Receipt[] {
   return receipts;
 }
 
-/** 相同尺寸/帧数的实测耗时 → 每条秒数;没有就 undefined。 */
-function calibrate(receipts: Receipt[], requests: NewRequest[]): number | undefined {
-  const first = requests[0];
-  if (first === undefined) return undefined;
-  let samples: number[] = [];
+/**
+ * 某个规格的实测耗时(每秒/条)。只收**这次同样环境、同样规格、成功跑完**的样本:
+ * - 失败/中断的不算(跑炸的耗时不是耗时);
+ * - 回执里记了工作流哈希、与现在这份对不上就不收(换了图就不是一回事);
+ * - 尺寸/帧数必须与这条请求完全一致,不拿别的规格推。
+ */
+function calibrate(receipts: Receipt[], request: NewRequest, workflowHash: string): number | undefined {
+  const samples: number[] = [];
   for (const receipt of receipts) {
+    const locked = receipt.locks?.workflow?.sha256;
+    if (locked !== undefined && locked !== workflowHash) continue;
     for (const shot of receipt.shots ?? []) {
-      if (shot.width !== first.width || shot.height !== first.height || shot.frames !== first.frames) continue;
+      if (shot.state !== 'succeeded') continue;
+      if (shot.width !== request.width || shot.height !== request.height || shot.frames !== request.frames) continue;
       if (typeof shot.elapsedMs !== 'number' || shot.elapsedMs <= 0) continue;
       samples.push(shot.elapsedMs / 1000);
     }
   }
   if (samples.length === 0) return undefined;
-  samples = samples.slice(-5);
-  return samples.reduce((total, item) => total + item, 0) / samples.length;
+  const recent = samples.slice(-5);
+  return recent.reduce((total, item) => total + item, 0) / recent.length;
 }
 
-/** 从历史回执里读到的显存占用(有就报,没有就是 null)。 */
-function measuredVram(receipts: Receipt[]): number | null {
+/** 从历史回执里读到的显存占用(只认同样工作流的记录;有就报,没有就是 null)。 */
+function measuredVram(receipts: Receipt[], workflowHash: string): number | null {
   for (const receipt of receipts) {
+    const locked = receipt.locks?.workflow?.sha256;
+    if (locked !== undefined && locked !== workflowHash) continue;
     const value = receipt.checks?.vramRequiredBytes;
     if (typeof value === 'number' && value > 0) return value;
   }
@@ -171,10 +180,20 @@ export async function buildPlan(project: Project, options: PlanOptions): Promise
       if (selected !== undefined && selected.status !== 'available') {
         blockers.push(`镜头 ${shot.id} 选定的候选 ${selected.id} 状态是 ${selected.status},不能用`);
       }
-      if (shot.candidateIds.length > 0 && shot.selectedCandidateId === undefined) {
-        blockers.push(`镜头 ${shot.id} 已经有合格候选,必须先显式选定才复用`);
-      }
+      // 合格 = 跟当前配方(提示词/种子/尺寸/帧数/工作流)对得上的候选。
+      // 改过提示词的工程里那些旧配方候选不算数 —— 不然改片之后永远卡在这里生成不了新的。
       const request = requestFor(shot, workflowHash);
+      const usable = project.candidates.filter(
+        (candidate) =>
+          shot.candidateIds.includes(candidate.id) &&
+          candidate.recipeHash === request.recipeHash &&
+          candidate.status === 'available',
+      );
+      if (usable.length > 0 && shot.selectedCandidateId === undefined) {
+        blockers.push(
+          `镜头 ${shot.id} 已经有这条配方的合格候选(${usable.map((item) => item.id).join('、')}):先显式选定一个再复用,或者改提示词/种子换一条新配方`,
+        );
+      }
       dag.push(`生成本地候选 h3(镜头 ${shot.id},${request.width}x${request.height} · ${request.frames} 帧)`);
       if (!requests.some((item) => item.recipeHash === request.recipeHash)) requests.push(request);
     }
@@ -243,22 +262,26 @@ export async function buildPlan(project: Project, options: PlanOptions): Promise
   }
 
   const receipts = options.receipts ?? readReceipts(dir);
-  const perShot = calibrate(receipts, requests);
+  const currentWorkflowHash = h3WorkflowHash();
+  const perRequest = requests.map((request) => calibrate(receipts, request, currentWorkflowHash));
+  const uncalibrated = perRequest.filter((value) => value === undefined).length;
+  const sum = perRequest.reduce<number>((total, value) => total + (value ?? 0), 0);
   const wallSeconds =
-    perShot === undefined || requests.length === 0
+    uncalibrated > 0 || perRequest.length === 0
       ? null
-      : { low: Number((perShot * requests.length * 0.8).toFixed(1)), high: Number((perShot * requests.length * 1.25).toFixed(1)) };
+      : { low: Number((sum * 0.8).toFixed(1)), high: Number((sum * 1.25).toFixed(1)) };
+  const vramBytes = measuredVram(receipts, currentWorkflowHash);
   const inputBytes = measureInputs(project, dir);
   const estimates: Plan['estimates'] = {
     wallSeconds,
-    vramBytes: measuredVram(receipts),
+    vramBytes,
     ramBytes: null,
     diskBytes: inputBytes,
     basis: [
       wallSeconds === null
-        ? `耗时未校准:本机 runs/ 里没有 ${requests[0]?.width ?? '?'}x${requests[0]?.height ?? '?'} · ${requests[0]?.frames ?? '?'} 帧的实测记录,不拿旧平台数字顶`
-        : `耗时按本机实测 ${perShot?.toFixed(1)} 秒/条 × ${requests.length} 条(上下浮动按 ±20%/25%)`,
-      measuredVram(receipts) === null ? '显存没有实测记录,写 null' : '显存取自历史回执',
+        ? `耗时未校准:${uncalibrated}/${requests.length} 条没有同规格、同工作流、成功的本机实测记录,不拿旧平台数字顶`
+        : `耗时按本机同规格成功实测逐条相加 = ${sum.toFixed(1)} 秒(上下浮动按 ±20%/25%)`,
+      vramBytes === null ? '显存没有（同工作流的）实测记录,写 null' : '显存取自历史回执',
       inputBytes === null ? '磁盘没法量(有资产文件不在)' : '磁盘只算了要用到的输入素材之和,成片体积未校准',
     ].join(';'),
   };
@@ -286,7 +309,17 @@ export async function buildPlan(project: Project, options: PlanOptions): Promise
     blockers,
     ready: blockers.length === 0,
   };
-  return { planHash: sha256Of(canonicalJson(draft)), ...draft };
+  return { planHash: planHashOf(draft), ...draft };
+}
+
+/**
+ * 计划的指纹。**不含 `estimates`** —— 估值是从历史回执里现算的,
+ * 同批第一条跑完就会变;把它算进哈希,同一批的后几条会被自己的回执照着拒掉(PLAN_HASH_MISMATCH)。
+ * 冻的是「要干什么」(dag/请求/复用/预算/阻碍),估算只是报给人看的。
+ */
+export function planHashOf(plan: Omit<Plan, 'planHash'>): string {
+  const { estimates: _estimates, ...stable } = plan;
+  return sha256Of(canonicalJson(stable));
 }
 
 /** 用到的资产必须真在、且 sha256 对得上(工程内相对路径,不许越界)。 */

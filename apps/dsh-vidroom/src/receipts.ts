@@ -28,10 +28,10 @@ export type RunState =
 /** 运行模式:candidates 只出候选,final 出成片。 */
 export type RunMode = 'candidates' | 'final';
 
-/** 逐镜头的实测记录。 */
+/** 逐镜头的实测记录。`submitted` = 提过了、结果还没回来(进程中途挂了就留在这个状态)。 */
 export interface RunShot {
   shotId: string;
-  state: 'succeeded' | 'failed' | 'skipped';
+  state: 'submitted' | 'succeeded' | 'failed' | 'skipped';
   candidateId?: string;
   assetId?: string;
   promptId?: string;

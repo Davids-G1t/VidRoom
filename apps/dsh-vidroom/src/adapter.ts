@@ -76,7 +76,8 @@ export function h3Capabilities(input: CapabilityInput): H3Capabilities {
       fps: { type: 'integer', const: H3_FPS },
       workflowHash: { type: 'string', note: '要核的图哈希' },
     },
-    defaults: { seed: 'random', width: 640, height: 384, frames: 121, fps: H3_FPS },
+    // 默认帧数要自己合 17k+5 网格(124 = 17×7+5),不然能力接口给的默认值会被自己的校验拒。
+    defaults: { seed: 'random', width: 640, height: 384, frames: 124, fps: H3_FPS },
     limits: {
       minFrames: H3_MIN_FRAMES,
       maxFrames: H3_MAX_FRAMES,
@@ -163,8 +164,15 @@ export function assertSupported(request: H3Request): void {
   }
 }
 
-/** 提交一次精确生成并等结果(会先过准入闸)。 */
-export async function h3Run(runtime: VidroomRuntime, request: H3Request): Promise<H3RunResult> {
+/** 提交一次精确生成并等结果(会先过准入闸)。
+ * `hooks.onQueued` 在**刚投进队列**时叫一次(还没有结果):调用方靠它把 promptId 当场落盘 ——
+ * 进程半路挂了也能拿着这个编号去查,不至于“提交过但不知道编号”。
+ */
+export async function h3Run(
+  runtime: VidroomRuntime,
+  request: H3Request,
+  hooks: { onQueued?: (promptId: string) => void } = {},
+): Promise<H3RunResult> {
   assertSupported(request);
   const status = await runtime.status(true);
   if (!status.reachable) {
@@ -182,6 +190,7 @@ export async function h3Run(runtime: VidroomRuntime, request: H3Request): Promis
     seed,
   });
   const promptId = await runtime.client().queue(graph, { comment: AI_GENERATED_TAG });
+  hooks.onQueued?.(promptId);
   const done = await runtime.client().waitForCompletion(promptId);
   if (done.status === 'error') {
     throw new VidroomError('RENDER_FAILED', `H3 跑失败(prompt_id=${promptId}):${done.error ?? '没给原因'}`);

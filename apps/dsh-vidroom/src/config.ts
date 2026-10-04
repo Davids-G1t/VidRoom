@@ -24,6 +24,14 @@ export const Config = z.object({
   ffprobePath: z.string().default('ffprobe'),
   /** H3 权重所在目录(只在 lock 时核对存在性/哈希,不复制不下载)。 */
   modelsRoot: z.string().default(join(homedir(), 'Apps', 'vidroom', 'models')),
+  /**
+   * 要不要把第 2 批的工程工具注册进聊天。**默认不开**。
+   *
+   * 设计页的硬边界:参考片、文案、音轨、工程内容不进云端口语 —— 聊天工具的入参与返回都会进宿主 LLM 的上下文,
+   * 所以只有宿主聊天模型确实在本机跑时才准开。这个插件读不出宿主 LLM 配在哪,只能由部署的人声明。
+   * 不开时工程面走面板与本地路由(`/vidroom/project` 等),活儿与工具是同一批函数。
+   */
+  chatTools: z.boolean().default(false),
 });
 
 export type Config = {
@@ -43,6 +51,8 @@ export type Config = {
   ffprobePath: string;
   /** H3 权重目录。 */
   modelsRoot: string;
+  /** 是否把第 2 批工程工具注册进聊天(默认 false:内容不进云端对话)。 */
+  chatTools: boolean;
 }
 
 /** 媒体工具的路径(合成与探测都用这一份)。 */
@@ -68,5 +78,6 @@ export function readConfig(raw: Partial<Record<keyof Config, unknown>> = {}): Co
     ffmpegPath: str(raw.ffmpegPath, 'ffmpeg').replace(/\/+$/, ''),
     ffprobePath: str(raw.ffprobePath, 'ffprobe').replace(/\/+$/, ''),
     modelsRoot: str(raw.modelsRoot, join(homedir(), 'Apps', 'vidroom', 'models')).replace(/\/+$/, ''),
+    chatTools: bool(raw.chatTools, false),
   };
 }

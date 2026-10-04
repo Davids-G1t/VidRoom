@@ -78,6 +78,8 @@
 | `REFERENCE_LOCAL_REQUIRED` | 登记参考时只给了链接 | 先把参考片落到本机再登记 |
 | `PROJECT_NOT_FOUND` / `PROJECT_INVALID` | 目录或 `project.vr.json` 不在、schema 不合法 | 先 `vidroom_project action=inspect` 看缺什么 |
 | `PROJECT_HASH_MISMATCH` / `PLAN_HASH_MISMATCH` | 工程或计划在算完以后变了 | 重新 `vidroom_plan` 再 render |
+| `WORKFLOW_MISMATCH` | 盘上工作流与工程锁记的对不上 | 换回原工作流,或在工程里重新记锁 |
+| `MODEL_MISMATCH` | 盘上权重与 `locks.models` 记的对不上(文件不在/哈希不同) | 换回原权重;真换了权重就重新 lock |
 | `PATCH_REJECTED` | 改了白名单外的字段 | 只动文案/提示词/种子/选定/样式这类创作字段 |
 | `BUDGET_EXCEEDED` | 变体数/新请求数/磁盘/时长超预算 | 调小批量,或在工程 `budget` 里显式放宽 |
 | `ALIGNMENT_REQUIRED` | 词锚对应的词被删、音轨或裁切换过 | 重新 `vidroom_align_words`,不要复用旧窗口 |

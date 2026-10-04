@@ -10,7 +10,10 @@
 ## 装
 
 ```bash
-dsh plugin --profile <profile> add /path/to/dsh-vidroom
+corepack pnpm install            # 在本仓根目录:给插件包自己装上依赖
+corepack pnpm --filter dsh-vidroom build
+
+dsh plugin --profile <profile> add /path/to/VidRoom/apps/dsh-vidroom
 ```
 
 `<profile>` 换成你在用的那份(`desktop` / `web`)。装完重启 dsh:桌面端会多一个 VidRoom 面板入口,
@@ -19,6 +22,14 @@ Agent 那边多出两个工具(见下)。卸:
 ```bash
 dsh plugin --profile <profile> remove dsh-vidroom
 ```
+
+两点实测过的注意:
+
+- **插件目录要先装过依赖**(上面那句 `pnpm install` 就是干这个的)。`dsh plugin add <目录>` 走的是 pnpm 的
+  `link:` 装法,它**不会**替你把被链过去的包的依赖装一遍;目录里没有 `node_modules` 时,dsh 重启后会报
+  「failed to import」而插件静默不工作。
+- 不想从目录装,也可以先 `corepack pnpm pack` 打出 `dsh-vidroom-<版本>.tgz`,再
+  `dsh plugin --profile <profile> add <tgz 的路径>`(打包会自动先构建,`prepack` 脚本负责)。
 
 ## Agent 拿到什么
 

@@ -20,6 +20,9 @@ dsh plugin --profile desktop add "$PWD/apps/dsh-vidroom"
 换成你在用的 profile(`desktop` / `web`)后重启 dsh:那边会多出 VidRoom 面板入口与两个 Agent 工具
 (`vidroom_generate` / `vidroom_workflows`)。`dsh plugin --profile <profile> remove dsh-vidroom` 卸掉。
 
+第一句 `pnpm install` 不能省:目录装法走 pnpm 的 `link:`,它不会替被链过去的包装依赖 ——
+插件目录里没有 `node_modules` 时,dsh 重启后会报「failed to import」而插件静默不工作(实测过)。
+
 ## 生成不在本仓
 
 真正的视频生成全部跑在 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)(GPL-3.0)里:它作为独立进程运行,

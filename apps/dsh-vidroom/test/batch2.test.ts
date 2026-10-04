@@ -12,7 +12,7 @@
  * 就 queue,上面那两组「提交数 = 0」的断言就会红。
  */
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1634,16 +1634,24 @@ describe('第五轮(合后自查)的回归', () => {
  * 写锁(第六轮审查的回归):工程写者不止一个进程 —— dsh 容器里的面板、机器人进程里的 CLI、
  * 面板拉起的渲染回写都会写同一条工程。「锁内读-改-写」是这层的互斥,旧行为(没锁)下
  * 两个进程可以同时进「读 → 算 → 写」,后写的把先写的整份盖掉。
+ *
+ * 这几条不用 ffmpeg(夹具是空工程),所以是 `it` 不是 `maybe`:没装 ffmpeg 也得跑。
  */
 describe('工程写锁(跨进程互斥)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-vidroom-lock-'));
 
-  maybe('锁被别的进程占着(新锁)→ 等到超时抛 PROJECT_BUSY,不静默写', async () => {
-    const projectDir = join(dir, 'project-locked');
-    const fixture = await makeFixture(projectDir, { clips: 1 });
-    writeFixture(projectDir, fixture.project);
+  /** 一条只有 id 的空工程:这几条盯的是写锁,不需要媒体。 */
+  function seedProject(name: string): string {
+    const projectDir = join(dir, name);
+    writeProject(projectDir, emptyProject(name));
+    return projectDir;
+  }
+
+  it('锁被别的进程占着(新锁)→ 等到超时抛 PROJECT_BUSY,不静默写', () => {
+    const projectDir = seedProject('project-locked');
     // 冒充另一个活着的写者:锁文件在,而且年龄是新的(没到废锁线,不许抢)。
-    writeFileSync(lockFileOf(projectDir), '999999 2399-01-01T00:00:00.000Z\n');
+    writeFileSync(lockFileOf(projectDir), 'other-process-token\n');
+    const before = readProject(projectDir);
 
     const code = ((): string | null => {
       try {
@@ -1654,16 +1662,17 @@ describe('工程写锁(跨进程互斥)', () => {
       }
     })();
     expect(code).toBe('PROJECT_BUSY');
-    // 拒了就是一点都没写:revision 还是夹具那份(旧行为会照写不误)。
-    expect(readProject(projectDir).revision).toBe(fixture.project.revision);
+    // 拒了就是一点都没写:revision 还是那份(旧行为会照写不误)。
+    expect(readProject(projectDir).revision).toBe(before.revision);
+    // 别人的锁还在(没被顺手删掉)。
+    expect(existsSync(lockFileOf(projectDir))).toBe(true);
   }, 30_000);
 
-  maybe('废锁(持有者崩了)→ 抢过来继续干,不把后面的写者卡死', async () => {
-    const projectDir = join(dir, 'project-stale-lock');
-    const fixture = await makeFixture(projectDir, { clips: 1 });
-    writeFixture(projectDir, fixture.project);
+  it('废锁(持有者崩了)→ 抢过来继续干,办完把锁放掉', () => {
+    const projectDir = seedProject('project-stale-lock');
+    const before = readProject(projectDir);
     // 崩掉的进程留下的锁:文件在,但已经很旧了。
-    writeFileSync(lockFileOf(projectDir), '999999 2000-01-01T00:00:00.000Z\n');
+    writeFileSync(lockFileOf(projectDir), 'crashed-process-token\n');
     const old = new Date(Date.now() - 120_000);
     utimesSync(lockFileOf(projectDir), old, old);
 
@@ -1672,16 +1681,56 @@ describe('工程写锁(跨进程互斥)', () => {
       revision: current.revision + 1,
       parentHash: projectHash(current),
     }));
-    expect(next.revision).toBe(fixture.project.revision + 1);
-    // 干完把锁放掉,别让下一个写者撞废锁。
+    expect(next.revision).toBe(before.revision + 1);
     expect(existsSync(lockFileOf(projectDir))).toBe(false);
   }, 30_000);
 
-  maybe('正常写完不留锁:锁文件随写随消', async () => {
-    const projectDir = join(dir, 'project-lock-release');
-    const fixture = await makeFixture(projectDir, { clips: 1 });
-    writeFixture(projectDir, fixture.project);
-    updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
-    expect(existsSync(lockFileOf(projectDir))).toBe(false);
+  it('锁在中途被别人换手(本进程卡太久被判废锁)→ 写之前认出来:不落盘,也不删别人的锁', () => {
+    const projectDir = seedProject('project-lock-stolen');
+    const before = readProject(projectDir);
+
+    const code = ((): string | null => {
+      try {
+        updateProject(projectDir, (current) => {
+          // 冒充另一个进程:趁我还在算,把锁抢走换成它的令牌(旧行为:照写,顺手把它的锁删了)。
+          writeFileSync(lockFileOf(projectDir), 'thief-token\n');
+          return { ...current, revision: current.revision + 1 };
+        });
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+    expect(code).toBe('PROJECT_BUSY');
+    expect(readProject(projectDir).revision).toBe(before.revision);
+    // 关键:新持有者的锁不许被我收尾时删掉(删了第三个写者就能进来)。
+    expect(readFileSync(lockFileOf(projectDir), 'utf8').trim()).toBe('thief-token');
   }, 30_000);
+
+  it('真起第二个进程占锁 → PROJECT_BUSY(锁是跨进程的,不是内存里那把)', async () => {
+    const projectDir = seedProject('project-real-process');
+    const before = readProject(projectDir);
+    const lock = lockFileOf(projectDir);
+    // 子进程:占上锁,拿住 1.2 秒再放。
+    const holder = run('node', [
+      '-e',
+      "const fs=require('fs');fs.writeFileSync(process.argv[1],'subprocess-token\\n');setTimeout(()=>{fs.unlinkSync(process.argv[1]);},1200);",
+      lock,
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const code = ((): string | null => {
+      try {
+        updateProject(projectDir, (current) => ({ ...current, revision: current.revision + 1 }));
+        return null;
+      } catch (error: unknown) {
+        return errorCode(error);
+      }
+    })();
+    expect(code).toBe('PROJECT_BUSY');
+    expect(readProject(projectDir).revision).toBe(before.revision);
+
+    await holder;
+    expect(existsSync(lock)).toBe(false);
+  }, 60_000);
 });

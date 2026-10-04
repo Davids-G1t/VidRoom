@@ -419,8 +419,11 @@ export async function registerReference(
     dir = input.projectPath === undefined ? join(config.projectsRoot, projectId) : projectDirOf(input.projectPath);
     ensureDir(dir);
     project = emptyProject(projectId);
-    // 新工程先把空壳落盘:下面的登记统一走 updateProject(锁内重读),文件不在就没得读。
-    if (!existsSync(projectFileOf(dir))) writeProject(dir, project);
+    // 新工程先把空壳落盘(在锁里查、在锁里写):两个进程同时登记同一条新工程时,
+    // 只有先拿到锁的那个落空壳,后来者读到的是已经存在的工程,不会把别人的东西盖回去。
+    withProjectLock(dir, () => {
+      if (!existsSync(projectFileOf(dir))) writeProject(dir, project);
+    });
   }
 
   const asset = await importAsset(dir, {

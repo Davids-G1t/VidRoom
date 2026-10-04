@@ -7,8 +7,8 @@
  * patch 都直接拒掉 —— 不接受任意代码 patch。
  *
  * 写入口只有三个、不许旁路:`writeProject`(整份写,给夹具/测试)、`updateProject`(锁内读-改-写一条)、
- * `applyPatch`(白名单 patch,带 baseHash 核对)。**除夹具外一律走 `updateProject`** —— 它是唯一带
- * 跨进程互斥与乐观复核的写路径。
+ * `applyPatch`(白名单 patch 的纯函数:只算出新工程,不落盘;`baseHash` 的核对在 `updateProject` 里)。
+ * **除夹具外一律走 `updateProject`** —— 它是唯一带跨进程互斥与乐观复核的写路径。
  */
 
 import { closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
@@ -66,7 +66,7 @@ export function updateProject(
   merge: (current: Project) => Project,
   options: { baseHash?: string } = {},
 ): Project {
-  return withProjectLock(dir, () => {
+  return withProjectLock(dir, (assertOwned) => {
     for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
       const before = readProject(dir);
       if (options.baseHash !== undefined && projectHash(before) !== options.baseHash) {
@@ -77,6 +77,8 @@ export function updateProject(
       }
       const next = merge(before);
       if (projectHash(readProject(dir)) !== projectHash(before)) continue;
+      // 写之前再认一次手:锁要是中途被抢走(本进程卡太久),宁可回 PROJECT_BUSY 也不按旧快照落盘。
+      assertOwned();
       writeProject(dir, next);
       return next;
     }
@@ -93,8 +95,8 @@ const LOCK_WAIT_MS = 5;
 /** 持有者崩了会留下锁文件;超过这么久没动就算废锁,后来者抢过来继续干活。 */
 const LOCK_STALE_MS = 30_000;
 
-/** 本进程已持有的锁(同一进程内读-改-写嵌一层时不至于自己把自己锁死)。 */
-const heldLocks = new Set<string>();
+/** 本进程已持有的锁(同一进程内读-改-写嵌一层时不至于自己把自己锁死)。键是锁文件,值是我写进去的令牌。 */
+const heldLocks = new Map<string, string>();
 
 /** 让出 LOCK_WAIT_MS 毫秒再重试(同步等,不把调用点染成 async)。 */
 const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
@@ -112,22 +114,71 @@ export function lockFileOf(dir: string): string {
  *
  * 为什么不是内存锁:`writeProject` 的「读-改-写」跨进程也成立 —— dsh 容器里的面板、机器人进程里的
  * CLI、被面板拉起的渲染回写,是三个不同的进程,内存锁只挡得住其中一个。`open(…, O_EXCL)` 是
- * 文件系统给的原子占位,失败方等一小会儿;持有者崩了(锁文件没了主人)靠年龄判废锁,不会永久卡死。
+ * 文件系统给的原子占位,失败方等一小会儿;持有者崩了(锁文件没人管了)靠年龄判废锁,不会永久卡死。
+ *
+ * 锁文件里的内容就是持有者令牌 —— 释放和「我还持有吗」都靠它认自己:废锁被别人抢走后,
+ * 原来的持有者不能再删别人的锁。`run` 拿到一个 `assertOwned`(写进盘之前调一次):
+ * 自己那把锁中途被抢走(比如本进程被卡了 30 秒以上)时,宁可回 `PROJECT_BUSY` 也不往下写。
  */
-export function withProjectLock<T>(dir: string, run: () => T): T {
+export function withProjectLock<T>(dir: string, run: (assertOwned: () => void) => T): T {
   const lock = lockFileOf(dir);
+  const held = heldLocks.get(lock);
   // 重入:外面那层已经把进程内的写者排完队了。
-  if (heldLocks.has(lock)) return run();
+  if (held !== undefined) return run(() => assertOwned(lock, held));
+  const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  acquireLock(dir, lock, token);
+  heldLocks.set(lock, token);
+  try {
+    return run(() => assertOwned(lock, token));
+  } finally {
+    heldLocks.delete(lock);
+    // 只删自己那把手:锁已经被抢走换主时删了它,就是替新持有者开门(第三个写者就能进来)。
+    if (lockTokenOf(lock) === token) {
+      try {
+        unlinkSync(lock);
+      } catch {
+        // 锁文件已经没了(废锁被抢):不该发生,但别让收尾抛错盖掉真正的结果。
+      }
+    }
+  }
+}
+
+/** 锁文件里的内容就是持有者令牌。 */
+function lockTokenOf(lock: string): string | undefined {
+  try {
+    return readFileSync(lock, 'utf8').trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** 我这把锁还在不在自己手里 —— 不在就不能往下写(回 PROJECT_BUSY,让人重来)。 */
+function assertOwned(lock: string, token: string): void {
+  if (lockTokenOf(lock) !== token) {
+    throw new VidroomError(
+      'PROJECT_BUSY',
+      `这条工程的写锁已经换手(多半是本进程卡了 ${LOCK_STALE_MS}ms 以上,锁被判废锁抢走),这次不写:${lock}`,
+    );
+  }
+}
+
+/**
+ * 占位:失败方等一小会儿重试;只有真废锁(年龄超过 `LOCK_STALE_MS`)才抢。
+ *
+ * 抢的写法是「删旧的,下一轮重新 O_EXCL 占位」—— 不把「删掉」当成「拿到」:删完到占位之间
+ * 还可能有别的写者插进来,那也应该让它先。`for` 跑完还没拿到就抛 `PROJECT_BUSY`,绝不空着手进临界区。
+ */
+function acquireLock(dir: string, lock: string, token: string): void {
   ensureDir(dir);
   for (let attempt = 0; attempt < LOCK_TRIES; attempt += 1) {
     try {
       const fd = openSync(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
       try {
-        writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+        writeSync(fd, `${token}\n`);
       } finally {
         closeSync(fd);
       }
-      break;
+      return;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
@@ -138,26 +189,13 @@ export function withProjectLock<T>(dir: string, run: () => T): T {
       } catch {
         // 锁刚好被持有者放掉:下一轮直接创建。
       }
-      if (attempt === LOCK_TRIES - 1) {
-        throw new VidroomError(
-          'PROJECT_BUSY',
-          `工程正被另一个写者占着(${LOCK_TRIES * LOCK_WAIT_MS}ms 内没拿到锁),停一下再试:${dir}`,
-        );
-      }
       sleepMs(LOCK_WAIT_MS);
     }
   }
-  heldLocks.add(lock);
-  try {
-    return run();
-  } finally {
-    heldLocks.delete(lock);
-    try {
-      unlinkSync(lock);
-    } catch {
-      // 锁文件已经没了(废锁被抢):不该发生,但别让收尾抛错盖掉真正的结果。
-    }
-  }
+  throw new VidroomError(
+    'PROJECT_BUSY',
+    `工程正被另一个写者占着(${LOCK_TRIES * LOCK_WAIT_MS}ms 内没拿到锁),停一下再试:${dir}`,
+  );
 }
 
 /** 写工程(先写临时文件再 rename,避免半截文件)。 */

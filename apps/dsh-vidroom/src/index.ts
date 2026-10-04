@@ -1,12 +1,13 @@
 /**
  * dsh-vidroom 的插件入口(宿主侧)。
  *
- * 只做三件事:注册两个工具、挂面板用的同源路由、把随包技能告诉宿主。
+ * 只做三件事:注册工具(出片/工作流库 + 第 2 批的工程面)、挂面板用的同源路由、把随包技能告诉宿主。
  * 桌面壳、ComfyUI 的启停、聊天都是宿主的事,这边不碰。
  */
 
 import { createVidroomRuntime } from './runtime.js';
 import { registerVidroomTools, type HostContext } from './tools.js';
+import { registerVidroomProjectTools } from './project-tools.js';
 import { mountVidroomRoutes, type WebServerService } from './routes.js';
 import { readConfig } from './config.js';
 import { RunRegistry } from './runs.js';
@@ -20,6 +21,10 @@ export { resolutionFor } from './resolution.js';
 export { parseSkill, listWorkflows } from './library.js';
 export { runWorkflow } from './runner.js';
 export { createVidroomRuntime } from './runtime.js';
+export { registerVidroomProjectTools } from './project-tools.js';
+export { readProject, writeProject, applyPatch } from './project-io.js';
+export { buildPlan } from './plan.js';
+export { renderProject } from './render.js';
 
 export const name = 'dsh-vidroom';
 
@@ -52,7 +57,7 @@ export function apply(ctx: HostContext, entryConfig: unknown = {}): void {
   const runtime = createVidroomRuntime(config, new RunRegistry());
 
   ctx.effect(() => {
-    const disposers = registerVidroomTools(ctx, runtime);
+    const disposers = [...registerVidroomTools(ctx, runtime), ...registerVidroomProjectTools(ctx, runtime)];
     disposers.push(registerSkill(ctx));
     return () => {
       for (const dispose of disposers) dispose();

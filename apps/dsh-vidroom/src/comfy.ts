@@ -3,6 +3,8 @@
  * (/prompt、/history、/view、/system_stats),不需要 WebSocket —— 插件是
  * 一次性提交 + 轮询,进度条交给 ComfyUI 自己。
  */
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { ApiPrompt } from './h3.js';
 
 /** ComfyUI 报出来的一个产物文件。 */
@@ -36,6 +38,8 @@ export interface SystemStats {
   vramTotalGiB?: number;
   /** 当前空闲显存(GiB)。 */
   vramFreeGiB?: number;
+  /** ComfyUI 自报的版本(锁环境用;老版本不报就是 undefined)。 */
+  comfyuiVersion?: string;
 }
 
 /** 一次生成的最终结果。 */
@@ -88,6 +92,7 @@ export class ComfyUIClient {
   /** 提交一次生成,返回 ComfyUI 的 prompt_id。 */
   async queue(prompt: ApiPrompt, extraPngInfo: Record<string, unknown> = {}): Promise<string> {
     const response = await fetch(this.url('/prompt'), {
+      redirect: 'error',
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -113,6 +118,7 @@ export class ComfyUIClient {
   /** 读一次历史;任务还没进历史时返回 undefined。 */
   async history(promptId: string): Promise<HistoryEntry | undefined> {
     const response = await fetch(this.url(`/history/${encodeURIComponent(promptId)}`), {
+      redirect: 'error',
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(15_000),
     });
@@ -162,6 +168,7 @@ export class ComfyUIClient {
   /** /system_stats 里的显存状态,用来判断本机能不能跑 H3。 */
   async systemStats(): Promise<SystemStats> {
     const response = await fetch(this.url('/system_stats'), {
+      redirect: 'error',
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(10_000),
     });
@@ -170,12 +177,19 @@ export class ComfyUIClient {
     }
     const body = (await response.json()) as {
       devices?: Array<{ vram_total?: number; vram_free?: number }>;
+      system?: { comfyui_version?: unknown };
     };
+    const version = body.system?.comfyui_version;
+    const comfyuiVersion = typeof version === 'string' && version.trim() !== '' ? version.trim() : undefined;
     const device = body.devices?.[0];
-    if (device === undefined) return {};
+    if (device === undefined) return { ...(comfyuiVersion === undefined ? {} : { comfyuiVersion }) };
     const toGiB = (bytes: number | undefined): number | undefined =>
       typeof bytes === 'number' ? bytes / 1024 ** 3 : undefined;
-    return { vramTotalGiB: toGiB(device.vram_total), vramFreeGiB: toGiB(device.vram_free) };
+    return {
+      vramTotalGiB: toGiB(device.vram_total),
+      vramFreeGiB: toGiB(device.vram_free),
+      ...(comfyuiVersion === undefined ? {} : { comfyuiVersion }),
+    };
   }
 
   /** 一个产物文件在 ComfyUI 上的播放地址(浏览器可直接 <video src=...>)。 */
@@ -184,6 +198,22 @@ export class ComfyUIClient {
     return this.url(`/view?${query.toString()}`);
   }
 
+  /**
+   * 把 ComfyUI 的一个产物取到本机文件(生成素材要**立即固化**,不能指望它的内存历史)。
+   * 只走上面那个回环地址;拒绝任何重定向,免得被引到外网。
+   */
+  async fetchMedia(ref: MediaRef, targetPath: string): Promise<string> {
+    const response = await fetch(this.viewUrl(ref), {
+      redirect: 'error',
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!response.ok) {
+      throw new ComfyUIError(`取产物失败(${response.status}):${await readError(response)}`, response.status);
+    }
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, Buffer.from(await response.arrayBuffer()));
+    return targetPath;
+  }
 }
 
 /** 按扩展名判产物种类(面板据此挑播放器)。 */
